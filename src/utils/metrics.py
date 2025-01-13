@@ -108,3 +108,94 @@ def calculate_calmar_ratio(equity_curve: pd.Series, risk_free_rate: float = 0.0)
     annualized_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0.0
     return annualized_return / abs(mdd)
 
+
+def calculate_beta(equity_curve: pd.Series, market_returns: pd.Series) -> float:
+    """
+    Calculate the beta of the portfolio relative to a market benchmark.
+    Beta measures the portfolio's systematic risk relative to the market.
+
+    Args:
+        equity_curve (pd.Series): Time series of portfolio equity.
+        market_returns (pd.Series): Time series of market returns.
+
+    Returns:
+        float: Portfolio beta. Returns 0.0 if calculation fails due to insufficient data
+               or zero market variance.
+    """
+    logger.info("Calculating Portfolio Beta.")
+
+    # Calculate portfolio returns
+    portfolio_returns = equity_curve.pct_change().dropna()
+
+    # Ensure the series are aligned and have sufficient data
+    common_index = portfolio_returns.index.intersection(market_returns.index)
+    if len(common_index) < 2:
+        logger.warning("Insufficient overlapping data points to calculate beta. Returning 0.0")
+        return 0.0
+
+    portfolio_returns = portfolio_returns[common_index]
+    market_returns = market_returns[common_index]
+
+    # Calculate beta using covariance and variance
+    market_var = market_returns.var()
+    if market_var == 0:
+        logger.warning("Market variance is zero. Cannot calculate beta. Returning 0.0")
+        return 0.0
+
+    covariance = portfolio_returns.cov(market_returns)
+    beta = covariance / market_var
+
+    return beta
+
+
+def calculate_alpha(equity_curve: pd.Series,
+                    market_returns: pd.Series,
+                    risk_free_rate: float = 0.0) -> float:
+    """
+    Calculate Jensen's Alpha of the portfolio.
+    Alpha measures the portfolio's excess return relative to what would be predicted by beta.
+
+    Args:
+        equity_curve (pd.Series): Time series of portfolio equity.
+        market_returns (pd.Series): Time series of market returns.
+        risk_free_rate (float): Annual risk-free rate (expressed as a decimal, e.g. 0.02 for 2%).
+
+    Returns:
+        float: Portfolio alpha (annualized). Returns 0.0 if calculation fails due to
+               insufficient data or invalid beta.
+    """
+    logger.info("Calculating Portfolio Alpha.")
+
+    # Calculate portfolio returns
+    portfolio_returns = equity_curve.pct_change().dropna()
+
+    # Ensure the series are aligned and have sufficient data
+    common_index = portfolio_returns.index.intersection(market_returns.index)
+    if len(common_index) < 2:
+        logger.warning("Insufficient overlapping data points to calculate alpha. Returning 0.0")
+        return 0.0
+
+    portfolio_returns = portfolio_returns[common_index]
+    market_returns = market_returns[common_index]
+
+    # Calculate daily risk-free rate
+    daily_rf = risk_free_rate / 252.0
+
+    # Calculate beta
+    beta = calculate_beta(equity_curve, market_returns)
+    if beta == 0.0:
+        logger.warning("Beta calculation failed. Cannot calculate alpha. Returning 0.0")
+        return 0.0
+
+    # Calculate alpha using CAPM
+    # Alpha = Realized Return - (Risk Free Rate + Beta * (Market Return - Risk Free Rate))
+    portfolio_avg_return = portfolio_returns.mean()
+    market_avg_return = market_returns.mean()
+
+    alpha_daily = portfolio_avg_return - (daily_rf + beta * (market_avg_return - daily_rf))
+
+    # Annualize alpha
+    alpha_annual = alpha_daily * 252
+
+    return alpha_annual
+

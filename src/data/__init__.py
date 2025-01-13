@@ -9,7 +9,7 @@ Research Project.
 """
 
 # Importing necessary modules for easier access
-from .downloader import download_historical_data
+from .downloader import DataDownloader
 from .database import DatabaseManager
 from .preprocessor import Preprocessor
 from .feature_engineering import FeatureEngineer

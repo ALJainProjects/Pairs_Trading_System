@@ -16,7 +16,7 @@ class EnhancedPairAnalyzer:
     """Enhanced pair analysis component with comprehensive analytics."""
 
     def __init__(self):
-        self.correlation_analyzer = CorrelationAnalyzer()
+        self.correlation_analyzer = None
         self.cointegration_analyzer = StatisticalModel()
         self.clustering_analyzer = AssetClusteringAnalyzer()
         self.visualizer = PlotlyVisualizer()
@@ -28,6 +28,10 @@ class EnhancedPairAnalyzer:
         if 'historical_data' not in st.session_state:
             st.warning("Please load data first in the Data Loading section.")
             return
+
+        if self.correlation_analyzer is None:
+            returns = self._calculate_returns(st.session_state['historical_data'])
+            self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
 
         # Create tabs for different analysis methods
         tab1, tab2, tab3, tab4 = st.tabs([

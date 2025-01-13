@@ -19,11 +19,7 @@ from .metrics import (
     calculate_alpha
 )
 from .visualization import (
-    plot_equity_curve,
-    plot_performance_metrics,
-    plot_confusion_matrix,
-    plot_feature_importance,
-    plot_training_history
+    PlotlyVisualizer
 )
 from .validation import (
     check_missing_values,

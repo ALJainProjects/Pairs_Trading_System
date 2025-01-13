@@ -11,7 +11,8 @@ import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, List
 from tensorflow.python.keras.models import Sequential
-from tensorflow.python.keras.layers import Dense, LSTM, Dropout
+from tensorflow.python.keras.layers import Dense, Dropout
+from tensorflow.python.keras.layers.recurrent import LSTM
 from tensorflow.python.keras.callbacks import EarlyStopping
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split

@@ -10,7 +10,7 @@ logic, risk management, parameter optimization, and backtesting frameworks.
 
 # Importing necessary classes and functions for easier access
 from .base import BaseStrategy
-from .pairs_strategy_basic import PairSelector
-from .risk import RiskManager
+from .pairs_strategy_basic import PairsTrader
+from .risk import PairRiskManager
 from .optimization import StrategyOptimizer
-from .backtest import Backtester
+from .backtest import MultiPairBacktester
