@@ -76,7 +76,8 @@ class EnhancedDataLoader:
             # Allow manual input, CSV upload, and predefined lists
             ticker_input_method = st.radio(
                 "Ticker Input Method",
-                ["Manual Input", "CSV Upload", "NASDAQ 100", "S&P 500"]
+                ["Manual Input", "CSV Upload", "NASDAQ 100", "S&P 500"],
+                key='ticker_input_method'
             )
 
             if ticker_input_method == "Manual Input":
@@ -136,11 +137,13 @@ class EnhancedDataLoader:
         with col2:
             start_date = st.date_input(
                 "Start Date",
-                datetime.now() - timedelta(days=365 * 2)
+                datetime.now() - timedelta(days=365 * 2),
+                key='Start Date Direct Download'
             )
             end_date = st.date_input(
                 "End Date",
-                datetime.now()
+                datetime.now(),
+                key='End Date Direct Download'
             )
 
         # Download controls
@@ -208,13 +211,15 @@ class EnhancedDataLoader:
             )
             min_date = st.date_input(
                 "Start Date",
-                datetime.now() - timedelta(days=365)
+                datetime.now() - timedelta(days=365),
+                key='Start Date Database'
             )
 
         with col2:
             max_date = st.date_input(
                 "End Date",
-                datetime.now()
+                datetime.now(),
+                key='End Date Database'
             )
 
         if st.button("Query Database"):

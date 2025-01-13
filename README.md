@@ -87,7 +87,7 @@ pair_trading/
 
 5. **Launch Streamlit Dashboard**
    ```bash
-   streamlit run streamlit/app.py
+   streamlit_system run streamlit_system/app.py
    ```
 
 6. **Open Jupyter Notebooks**

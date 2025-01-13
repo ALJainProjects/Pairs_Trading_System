@@ -24,7 +24,6 @@ class PairTradingApp:
     def run(self):
         """Run the main application."""
         self._configure_page()
-        self._render_sidebar()
         self._render_main_content()
 
     def _configure_page(self):
@@ -43,7 +42,8 @@ class PairTradingApp:
             st.title("Navigation")
             page = st.radio(
                 "Select Section",
-                ["Data Loading", "Pair Analysis", "Strategy Builder", "Optimization"]
+                ["Data Loading", "Pair Analysis", "Strategy Builder", "Optimization"],
+                key='sidebar_main_radio'
             )
 
             # Session state indicators
