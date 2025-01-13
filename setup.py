@@ -1,0 +1,36 @@
+from setuptools import setup, find_packages
+
+setup(
+    name='pair_trading',
+    version='1.0.0',
+    description='Equity Pair Trading Research Project',
+    author='Arnav Jain',
+    author_email='ajain.careers@gmail.com',
+    url='https://github.com/yourusername/pair_trading',
+    packages=find_packages(),
+    install_requires=[
+        'pandas==1.5.3',
+        'numpy==1.24.2',
+        'scipy==1.10.1',
+        'scikit-learn==1.2.2',
+        'statsmodels==0.14.0',
+        'matplotlib==3.7.1',
+        'seaborn==0.12.2',
+        'networkx==3.1',
+        'streamlit==1.24.1',
+        'xgboost==1.7.5',
+        'lightgbm==3.3.6',
+        'optuna==3.1.0',
+        'PyWavelets==1.4.1',
+        'dtaidistance==2.3.0',
+        'loguru==0.6.0',
+        'pytest==7.3.1',
+        'joblib==1.3.1',
+    ],
+    classifiers=[
+        'Programming Language :: Python :: 3.10',
+        'License :: OSI Approved :: MIT License',
+        'Operating System :: OS Independent',
+    ],
+    python_requires='>=3.10',
+)

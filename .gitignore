@@ -1,0 +1,170 @@
+# ------------------------------------------------------------------------------
+# 1) Python
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+*.manifest
+*.spec
+
+# ------------------------------------------------------------------------------
+# 2) Development Environments
+# ------------------------------------------------------------------------------
+# Virtual environments
+.env
+.venv/
+env/
+ENV/
+venv/
+env.bak/
+venv.bak/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.spyderproject
+.spyproject
+.ropeproject
+.project
+.settings/
+.classpath
+
+# ------------------------------------------------------------------------------
+# 3) Testing and Coverage
+# ------------------------------------------------------------------------------
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ------------------------------------------------------------------------------
+# 4) Logs and Databases
+# ------------------------------------------------------------------------------
+logs/
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+db.sqlite3
+*.db
+celerybeat-schedule
+celerybeat.pid
+
+# ------------------------------------------------------------------------------
+# 5) Documentation
+# ------------------------------------------------------------------------------
+docs/_build/
+/site
+.mkdocs/
+
+# ------------------------------------------------------------------------------
+# 6) Jupyter and IPython
+# ------------------------------------------------------------------------------
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ------------------------------------------------------------------------------
+# 7) Type Checking and Linting
+# ------------------------------------------------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ------------------------------------------------------------------------------
+# 8) Framework specific
+# ------------------------------------------------------------------------------
+# Django
+local_settings.py
+db.sqlite3-journal
+media/
+
+# Flask
+instance/
+.webassets-cache
+
+# FastAPI
+.fastapi
+
+# Streamlit
+.streamlit/
+
+# ------------------------------------------------------------------------------
+# 9) Machine Learning
+# ------------------------------------------------------------------------------
+# Add specific paths for your project
+# models/        # Uncomment if you want to ignore all models
+# data/         # Uncomment if you want to ignore all data
+# Ignore specific file types if needed:
+# *.h5
+# *.pkl
+# *.pt          # PyTorch models
+# *.onnx        # ONNX models
+
+# ------------------------------------------------------------------------------
+# 10) OS specific
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+# ------------------------------------------------------------------------------
+# 11) Secrets and Configurations
+# ------------------------------------------------------------------------------
+.env.*
+!.env.example
+*.pem
+credentials.json
+config.json
+secrets.yaml
+/.venv/
+/.venv/etc/
+/.venv/include/
+/.venv/Lib/
+/.venv/Scripts/
+/.venv/share/
+/.venv/xgboost/
+/.venv/.gitignore
+/.venv/pyvenv.cfg
+/.venv/
