@@ -7,19 +7,20 @@ using actual backtest results.
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Tuple, Callable, Optional
-from src.strategy.base import BaseStrategy
+from typing import Dict, Tuple, Callable, Optional, Any
 from sklearn.model_selection import ParameterGrid
 from src.strategy.backtest import MultiPairBacktester
 import optuna
 from config.logging_config import logger
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 class StrategyOptimizer:
     """Optimizes strategy parameters using real backtesting."""
 
     def __init__(
         self,
-        strategy: BaseStrategy,
+        strategy: Any,
         returns: pd.DataFrame,
         objective_metric: Callable[[pd.Series, pd.DataFrame], float],
         parameter_grid: Dict,
@@ -47,7 +48,6 @@ class StrategyOptimizer:
         self.transaction_cost = transaction_cost
         self.max_pairs = max_pairs
 
-        # Store optimization results
         self.optimization_results = []
 
     def _create_backtester(self) -> MultiPairBacktester:
@@ -70,19 +70,15 @@ class StrategyOptimizer:
         Returns:
             float: Objective metric value
         """
-        # Reset strategy and set parameters
         self.strategy.reset()
         for param, value in params.items():
             setattr(self.strategy, param, value)
 
-        # Run backtest
         backtester = self._create_backtester()
         equity_curve = backtester.run_backtest()
 
-        # Calculate objective metric
         score = self.objective_metric(equity_curve, self.returns)
 
-        # Store results
         self.optimization_results.append({
             'parameters': params,
             'score': score,
@@ -152,19 +148,13 @@ class StrategyOptimizer:
 
     def plot_optimization_results(self) -> None:
         """Plot optimization results using plotly."""
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
-
-        # Create figure with secondary y-axis
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-        # Sort results by score
         sorted_results = sorted(
             self.optimization_results,
             key=lambda x: x['score']
         )
 
-        # Plot scores
         scores = [r['score'] for r in sorted_results]
         fig.add_trace(
             go.Scatter(
@@ -175,7 +165,6 @@ class StrategyOptimizer:
             secondary_y=False
         )
 
-        # Plot Sharpe ratios
         sharpes = [r['metrics']['Sharpe Ratio'] for r in sorted_results]
         fig.add_trace(
             go.Scatter(
@@ -206,7 +195,6 @@ class StrategyOptimizer:
         Returns:
             Dictionary with optimization results
         """
-        # Convert results to DataFrame
         results_df = pd.DataFrame([
             {
                 **r['parameters'],
@@ -218,10 +206,8 @@ class StrategyOptimizer:
             for r in self.optimization_results
         ])
 
-        # Sort by score
         results_df = results_df.sort_values('Score', ascending=False)
 
-        # Save to Excel if requested
         if output_file:
             with pd.ExcelWriter(output_file) as writer:
                 results_df.to_excel(
@@ -230,7 +216,6 @@ class StrategyOptimizer:
                     index=False
                 )
 
-                # Add best equity curve
                 best_result = max(
                     self.optimization_results,
                     key=lambda x: x['score']
@@ -246,46 +231,87 @@ class StrategyOptimizer:
             'best_score': results_df.iloc[0]['Score']
         }
 
-def main():
-    """Example usage."""
-    # Define strategy and parameters
-    strategy = BaseStrategy()  # Your strategy class
-    returns = pd.DataFrame(...)  # Your returns data
 
-    # Define parameter grid
+def main():
+    """Example usage of strategy optimization."""
+    from src.strategy.pairs_strategy_basic import PairsTrader
+    import yfinance as yf
+    from datetime import datetime, timedelta
+
+    # Download sample data for testing
+    tickers = ['AAPL', 'MSFT', 'GOOGL', 'FB', 'AMZN', 'NFLX']
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365 * 2)
+
+    returns_data = pd.DataFrame()
+    for ticker in tickers:
+        try:
+            data = yf.download(ticker, start=start_date, end=end_date)
+            returns_data[ticker] = data['Adj Close'].pct_change()
+        except Exception as e:
+            print(f"Error downloading {ticker}: {str(e)}")
+
+    returns_data = returns_data.dropna()
+
+    strategy = PairsTrader(entry_threshold=2.0)
+
     param_grid = {
-        'lookback_period': [10, 20, 30],
-        'zscore_threshold': (1.5, 3.0),
-        'stop_loss': [0.02, 0.03, 0.04]
+        'correlation_threshold': (0.6, 0.9),
+        'lookback_period': (10, 50),
+        'entry_threshold': (1.0, 3.0),
+        'exit_threshold': (0.2, 1.0)
     }
 
-    # Define objective function (e.g., Sharpe ratio)
     def objective(equity: pd.Series, returns: pd.DataFrame) -> float:
-        ret = equity.pct_change().dropna()
-        if len(ret) == 0 or ret.std() == 0:
+        daily_returns = equity.pct_change().dropna()
+        if len(daily_returns) == 0 or daily_returns.std() == 0:
             return -np.inf
-        return ret.mean() / ret.std() * np.sqrt(252)
 
-    # Initialize optimizer
+        sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
+
+        max_drawdown = abs((equity / equity.cummax() - 1).min())
+        drawdown_penalty = max_drawdown * 2
+
+        return sharpe - drawdown_penalty
+
     optimizer = StrategyOptimizer(
         strategy=strategy,
-        returns=returns,
+        returns=returns_data,
         objective_metric=objective,
         parameter_grid=param_grid,
         initial_capital=100000,
-        max_pairs=5
+        transaction_cost=0.001,
+        max_pairs=3
     )
 
-    # Run optimization
-    best_params, best_score = optimizer.bayesian_optimize(n_trials=100)
+    try:
+        print("Starting Bayesian optimization...")
+        best_params, best_score = optimizer.bayesian_optimize(n_trials=50)
+        print(f"Best parameters found: {best_params}")
+        print(f"Best score achieved: {best_score:.4f}")
 
-    # Generate and save report
-    report = optimizer.generate_optimization_report("optimization_results.xlsx")
+        report = optimizer.generate_optimization_report("optimization_results.xlsx")
+        print("\nOptimization report generated")
+        print("\nTop 5 parameter combinations:")
+        print(report['results'].head())
 
-    # Plot results
-    optimizer.plot_optimization_results()
+        optimizer.plot_optimization_results()
 
-    return report, best_params, best_score
+        return {
+            'best_parameters': best_params,
+            'best_score': best_score,
+            'report': report,
+            'optimizer': optimizer
+        }
+
+    except Exception as e:
+        print(f"Error during optimization: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        return None
+
 
 if __name__ == "__main__":
-    main()
+    results = main()
+    if results:
+        print("\nOptimization completed successfully!")

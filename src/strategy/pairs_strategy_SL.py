@@ -10,7 +10,7 @@ This module implements statistical methods for pairs trading with:
 
 import pandas as pd
 import numpy as np
-from typing import Tuple, Dict, Optional
+from typing import Optional
 from statsmodels.tsa.stattools import coint
 from statsmodels.regression.linear_model import OLS
 from statsmodels.tools import add_constant
@@ -21,11 +21,11 @@ class StatisticalPairsTrader:
     """Statistical pairs trading with proper temporal handling."""
 
     def __init__(self,
-                 lookback_window: int = 252,  # 1 year
+                 lookback_window: int = 252,
                  zscore_window: int = 20,
                  zscore_threshold: float = 2.0,
                  min_half_life: int = 5,
-                 max_half_life: int = 126):  # ~6 months
+                 max_half_life: int = 126):
         """
         Initialize the pairs trader.
 
@@ -62,7 +62,6 @@ class StatisticalPairsTrader:
 
         pvalues = []
         for i in range(min_window, len(asset1)):
-            # Use only past data for the test
             p_val = self._single_coint_test(
                 asset1.iloc[i - min_window:i],
                 asset2.iloc[i - min_window:i]
@@ -83,7 +82,7 @@ class StatisticalPairsTrader:
             _, p_val, _ = coint(asset1, asset2)
             return p_val
         except:
-            return 1.0  # Non-cointegrated case
+            return 1.0
 
     def calculate_rolling_hedge_ratio(self,
                                       asset1: pd.Series,
@@ -106,7 +105,6 @@ class StatisticalPairsTrader:
         betas = []
 
         for i in range(window, len(asset1)):
-            # Use only past data for regression
             X = add_constant(asset2.iloc[i - window:i])
             y = asset1.iloc[i - window:i]
 
@@ -114,7 +112,6 @@ class StatisticalPairsTrader:
                 model = OLS(y, X).fit()
                 alpha, beta = model.params
             except:
-                # Use previous values or defaults
                 alpha = alphas[-1] if alphas else 0
                 beta = betas[-1] if betas else 1
 
@@ -149,12 +146,10 @@ class StatisticalPairsTrader:
                 'alpha': 0.0
             })
         else:
-            # Calculate rolling hedge ratios
             params = self.calculate_rolling_hedge_ratio(
                 asset1, asset2, self.lookback_window
             )
 
-            # Calculate spread using rolling parameters
             spread = pd.Series(index=params.index)
             for i in range(len(params)):
                 alpha = params.iloc[i]['alpha']
@@ -181,7 +176,7 @@ class StatisticalPairsTrader:
         y = delta_spread.iloc[1:]
 
         model = OLS(y, X).fit()
-        gamma = model.params[1]  # Speed of mean reversion
+        gamma = model.params[1]
 
         half_life = -np.log(2) / gamma if gamma < 0 else np.inf
         return half_life
@@ -224,47 +219,38 @@ class StatisticalPairsTrader:
         if validation_start is None:
             validation_start = asset1.index[self.lookback_window]
 
-        # Initialize results
         signals = pd.DataFrame(index=asset1.index)
         signals['position'] = 0
 
-        # Calculate rolling cointegration
         coint_pvals = self.calculate_rolling_cointegration(
             asset1, asset2, min_window=self.lookback_window
         )
 
-        # Calculate rolling spread
         spread_data = self.calculate_rolling_spread(asset1, asset2)
 
-        # Calculate rolling z-scores
         zscores = self.calculate_rolling_zscore(
             spread_data['spread'],
             self.zscore_window
         )
 
-        # Generate signals for validation period
         validation_mask = signals.index >= validation_start
 
         for i in signals.index[validation_mask]:
-            # Check cointegration
             if coint_pvals.loc[i] > 0.05:
                 continue
 
-            # Check half-life
             current_spread = spread_data['spread'].loc[:i]
             half_life = self.calculate_half_life(current_spread)
 
             if not (self.min_half_life <= half_life <= self.max_half_life):
                 continue
 
-            # Generate signal based on z-score
             z_val = zscores.loc[i]
             if z_val > self.zscore_threshold:
-                signals.loc[i, 'position'] = -1  # Short the spread
+                signals.loc[i, 'position'] = -1
             elif z_val < -self.zscore_threshold:
-                signals.loc[i, 'position'] = 1  # Long the spread
+                signals.loc[i, 'position'] = 1
 
-        # Add metrics
         signals['spread'] = spread_data['spread']
         signals['zscore'] = zscores
         signals['coint_pvalue'] = coint_pvals
@@ -289,11 +275,9 @@ class StatisticalPairsTrader:
         """
         results = signals.copy()
 
-        # Calculate asset returns
         asset1_rets = asset1.pct_change()
         asset2_rets = asset2.pct_change()
 
-        # Calculate strategy returns
         long_returns = results['position'].shift(1) * (
                 asset1_rets - results['hedge_ratio'] * asset2_rets
         )
@@ -305,34 +289,113 @@ class StatisticalPairsTrader:
 
 
 def main():
-    """Example usage with proper temporal handling."""
-    # Load data
-    asset1_prices = pd.Series(...)  # First asset prices
-    asset2_prices = pd.Series(...)  # Second asset prices
+    """Example usage of statistical pairs trading with proper temporal validation."""
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
-    # Initialize trader
-    trader = StatisticalPairsTrader(
-        lookback_window=252,
-        zscore_window=20,
-        zscore_threshold=2.0
-    )
+    try:
+        logger.info("Starting statistical pairs trading analysis...")
 
-    # Generate signals using walk-forward validation
-    signals = trader.generate_signals(
-        asset1_prices,
-        asset2_prices,
-        validation_start=pd.Timestamp('2022-01-01')
-    )
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365 * 3)
+        validation_start = end_date - timedelta(days=365)
 
-    # Calculate returns
-    results = trader.calculate_returns(
-        signals,
-        asset1_prices,
-        asset2_prices
-    )
+        stock1_symbol = "JPM"
+        stock2_symbol = "GS"
 
-    return results
+        stock1_data = yf.download(stock1_symbol, start=start_date, end=end_date)
+        stock2_data = yf.download(stock2_symbol, start=start_date, end=end_date)
+
+        stock1_prices = stock1_data['Adj Close']
+        stock2_prices = stock2_data['Adj Close']
+
+        logger.info(f"Downloaded {len(stock1_prices)} days of data for {stock1_symbol} and {stock2_symbol}")
+
+        trader = StatisticalPairsTrader(
+            lookback_window=252,
+            zscore_window=20,
+            zscore_threshold=2.0,
+            min_half_life=5,
+            max_half_life=126
+        )
+
+        logger.info("Generating trading signals...")
+        signals = trader.generate_signals(
+            stock1_prices,
+            stock2_prices,
+            validation_start
+        )
+
+        logger.info("Calculating strategy returns...")
+        results = trader.calculate_returns(
+            signals,
+            stock1_prices,
+            stock2_prices
+        )
+
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                            subplot_titles=['Asset Prices', 'Spread Z-Score', 'Strategy Returns'])
+
+        fig.add_trace(
+            go.Scatter(x=stock1_prices.index, y=stock1_prices, name=stock1_symbol),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=stock2_prices.index, y=stock2_prices, name=stock2_symbol),
+            row=1, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(x=signals.index, y=signals['zscore'], name='Z-Score'),
+            row=2, col=1
+        )
+        fig.add_hline(y=trader.zscore_threshold, line_dash="dash", row=2, col=1)
+        fig.add_hline(y=-trader.zscore_threshold, line_dash="dash", row=2, col=1)
+
+        fig.add_trace(
+            go.Scatter(x=results.index, y=results['cumulative_returns'], name='Cumulative Returns'),
+            row=3, col=1
+        )
+
+        fig.update_layout(height=900, title_text=f"Statistical Pairs Trading: {stock1_symbol} vs {stock2_symbol}")
+        fig.show()
+
+        performance_metrics = {
+            'Total Return': results['cumulative_returns'].iloc[-1] - 1,
+            'Annual Return': (results['cumulative_returns'].iloc[-1] ** (252 / len(results)) - 1),
+            'Sharpe Ratio': results['strategy_returns'].mean() / results['strategy_returns'].std() * np.sqrt(252),
+            'Max Drawdown': (results['cumulative_returns'] / results['cumulative_returns'].cummax() - 1).min(),
+            'Cointegration P-value': signals['coint_pvalue'].iloc[-1],
+            'Average Hedge Ratio': signals['hedge_ratio'].mean()
+        }
+
+        print("\nStrategy Performance Metrics:")
+        for metric, value in performance_metrics.items():
+            print(f"{metric}: {value:.4f}")
+
+        return {
+            'signals': signals,
+            'results': results,
+            'performance': performance_metrics,
+            'prices': {
+                'asset1': stock1_prices,
+                'asset2': stock2_prices
+            },
+            'trader': trader
+        }
+
+    except Exception as e:
+        logger.error(f"Error in statistical pairs trading execution: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
 
 
 if __name__ == "__main__":
-    main()
+    output = main()
+    if output is not None:
+        logger.info("Statistical pairs trading analysis completed successfully")
+    else:
+        logger.error("Analysis failed. Check logs for details")

@@ -37,10 +37,10 @@ def train_models_in_parallel(model_funcs: List[Callable],
                              kwargs_list: List[Dict],
                              n_jobs: int = None) -> List[Any]:
     """
-    Train multiple models in parallel, each with potentially different functions and arguments.
+    Train multiple models_data in parallel, each with potentially different functions and arguments.
 
     Args:
-        model_funcs (List[Callable]): List of callables to train models.
+        model_funcs (List[Callable]): List of callables to train models_data.
         args_list (List[Tuple]): Positional arguments for each model_func.
         kwargs_list (List[Dict]): Keyword arguments for each model_func.
         n_jobs (int): Number of processes to use. Defaults to all CPU cores.
@@ -51,7 +51,7 @@ def train_models_in_parallel(model_funcs: List[Callable],
     """
     if n_jobs is None:
         n_jobs = multiprocessing.cpu_count()
-    logger.info(f"Training {len(model_funcs)} models in parallel with {n_jobs} processes.")
+    logger.info(f"Training {len(model_funcs)} models_data in parallel with {n_jobs} processes.")
 
     tasks = zip(model_funcs, args_list, kwargs_list)
     with Pool(processes=n_jobs) as pool:

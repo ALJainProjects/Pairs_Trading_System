@@ -52,7 +52,6 @@ class PlotlyVisualizer:
             logger.warning("Empty equity curve")
             return go.Figure()
 
-        # Create figure with secondary y-axis if including drawdown
         fig = make_subplots(
             rows=2 if include_drawdown else 1,
             cols=1,
@@ -61,7 +60,6 @@ class PlotlyVisualizer:
             vertical_spacing=0.12
         )
 
-        # Plot equity curve
         fig.add_trace(
             go.Scatter(
                 x=equity_curve.index,
@@ -73,7 +71,6 @@ class PlotlyVisualizer:
             row=1, col=1
         )
 
-        # Add drawdown subplot
         if include_drawdown:
             drawdown = (equity_curve - equity_curve.cummax()) / equity_curve.cummax()
             fig.add_trace(
@@ -87,7 +84,6 @@ class PlotlyVisualizer:
                 row=2, col=1
             )
 
-        # Update layout
         fig.update_layout(
             title=title,
             template=self.theme,
@@ -95,7 +91,6 @@ class PlotlyVisualizer:
             showlegend=True
         )
 
-        # Update axes titles
         fig.update_yaxes(title_text="Portfolio Value", row=1, col=1)
         if include_drawdown:
             fig.update_yaxes(title_text="Drawdown", row=2, col=1)
@@ -113,13 +108,11 @@ class PlotlyVisualizer:
             logger.warning("No metrics to plot")
             return go.Figure()
 
-        # Convert to DataFrame and sort
         df_metrics = pd.DataFrame(
             list(metrics.items()),
             columns=['Metric', 'Value']
         ).sort_values('Value', ascending=True)
 
-        # Create horizontal bar chart
         fig = go.Figure(
             go.Bar(
                 x=df_metrics['Value'],
@@ -133,10 +126,10 @@ class PlotlyVisualizer:
         fig.update_layout(
             title=title,
             template=self.theme,
-            height=max(400, len(metrics) * 30),  # Dynamic height
+            height=max(400, len(metrics) * 30),
             yaxis_title='Metrics',
             xaxis_title='Values',
-            margin=dict(l=200)  # More space for metric names
+            margin=dict(l=200)
         )
 
         self._handle_figure_output(fig, show_fig, output_file)
@@ -160,7 +153,6 @@ class PlotlyVisualizer:
             logger.warning("No trades to analyze")
             return go.Figure()
 
-        # Create subplots
         fig = make_subplots(
             rows=2,
             cols=2,
@@ -172,7 +164,6 @@ class PlotlyVisualizer:
             ]
         )
 
-        # 1. PnL Distribution
         pnl_hist = go.Histogram(
             x=trades['PnL'],
             name='PnL Distribution',
@@ -180,7 +171,6 @@ class PlotlyVisualizer:
         )
         fig.add_trace(pnl_hist, row=1, col=1)
 
-        # 2. Cumulative PnL
         cum_pnl = trades['PnL'].cumsum()
         fig.add_trace(
             go.Scatter(
@@ -191,7 +181,6 @@ class PlotlyVisualizer:
             row=1, col=2
         )
 
-        # 3. Trade Durations
         if 'Duration' in trades.columns:
             duration_hist = go.Histogram(
                 x=trades['Duration'],
@@ -199,7 +188,6 @@ class PlotlyVisualizer:
             )
             fig.add_trace(duration_hist, row=2, col=1)
 
-        # 4. Win/Loss by Pair
         if 'Pair' in trades.columns:
             win_rates = trades.groupby('Pair')['PnL'].apply(
                 lambda x: (x > 0).mean()
@@ -214,7 +202,6 @@ class PlotlyVisualizer:
                 row=2, col=2
             )
 
-        # Update layout
         fig.update_layout(
             title=title,
             template=self.theme,
@@ -235,10 +222,8 @@ class PlotlyVisualizer:
             logger.warning("Empty returns data")
             return go.Figure()
 
-        # Calculate correlation matrix
         corr_matrix = returns.corr()
 
-        # Create heatmap
         fig = go.Figure(
             data=go.Heatmap(
                 z=corr_matrix.values,
@@ -275,7 +260,6 @@ class PlotlyVisualizer:
             logger.warning("Empty spread data")
             return go.Figure()
 
-        # Create subplots
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -283,7 +267,6 @@ class PlotlyVisualizer:
             vertical_spacing=0.12
         )
 
-        # Plot spread
         fig.add_trace(
             go.Scatter(
                 x=spread.index,
@@ -294,9 +277,7 @@ class PlotlyVisualizer:
             row=1, col=1
         )
 
-        # Add trade markers if provided
         if trades is not None:
-            # Entry points
             entries = trades[trades['Action'] == 'ENTRY']
             fig.add_trace(
                 go.Scatter(
@@ -309,7 +290,6 @@ class PlotlyVisualizer:
                 row=1, col=1
             )
 
-            # Exit points
             exits = trades[trades['Action'] == 'EXIT']
             fig.add_trace(
                 go.Scatter(
@@ -322,7 +302,6 @@ class PlotlyVisualizer:
                 row=1, col=1
             )
 
-        # Plot z-scores
         fig.add_trace(
             go.Scatter(
                 x=z_scores.index,
@@ -333,7 +312,6 @@ class PlotlyVisualizer:
             row=2, col=1
         )
 
-        # Add threshold lines
         for threshold in [-2, -1, 0, 1, 2]:
             fig.add_hline(
                 y=threshold,
@@ -342,7 +320,6 @@ class PlotlyVisualizer:
                 row=2, col=1
             )
 
-        # Update layout
         fig.update_layout(
             title=title,
             template=self.theme,
@@ -370,7 +347,6 @@ class PlotlyVisualizer:
             param_cols = param_cols[:2]
 
         if len(param_cols) == 1:
-            # Single parameter visualization
             fig = go.Figure(
                 go.Scatter(
                     x=results[param_cols[0]],
@@ -389,7 +365,6 @@ class PlotlyVisualizer:
             )
 
         else:
-            # Two parameter visualization
             fig = go.Figure(
                 go.Scatter(
                     x=results[param_cols[0]],
@@ -422,11 +397,9 @@ class PlotlyVisualizer:
                             output_file: Optional[str] = None) -> None:
         """Handle figure display and saving."""
         if output_file:
-            # Create directory if needed
             output_path = Path(output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Save based on extension
             if output_file.endswith('.html'):
                 fig.write_html(output_file)
             else:
@@ -435,38 +408,133 @@ class PlotlyVisualizer:
         if show_fig:
             fig.show()
 
+
 def main():
-    """Example usage of visualization functions."""
-    # Sample data
-    dates = pd.date_range('2023-01-01', '2023-12-31', freq='D')
-    equity_curve = pd.Series(
-        np.random.normal(0, 1, len(dates)).cumsum() + 100000,
-        index=dates
-    )
+    """Example usage of PlotlyVisualizer with comprehensive examples."""
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    import os
 
-    # Initialize visualizer
-    viz = PlotlyVisualizer()
+    try:
+        logger.info("Starting visualization examples...")
+        output_dir = "visualization_output"
+        os.makedirs(output_dir, exist_ok=True)
 
-    # Create and save plots
-    fig1 = viz.plot_equity_curve(
-        equity_curve,
-        title='Sample Equity Curve',
-        output_file='equity_curve.html'
-    )
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
 
-    # Performance metrics
-    metrics = {
-        'Sharpe Ratio': 1.5,
-        'Max Drawdown': -0.15,
-        'Annual Return': 0.25
-    }
+        symbols = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA']
+        prices = pd.DataFrame()
+        returns = pd.DataFrame()
 
-    fig2 = viz.plot_performance_metrics(
-        metrics,
-        output_file='performance.html'
-    )
+        for symbol in symbols:
+            data = yf.download(symbol, start=start_date, end=end_date)
+            prices[symbol] = data['Adj Close']
+            returns[symbol] = prices[symbol].pct_change()
 
-    return fig1, fig2
+        initial_value = 100000
+        equity_curve = pd.Series(index=prices.index, dtype=float)
+        equity_curve.iloc[0] = initial_value
+
+        for i in range(1, len(equity_curve)):
+            equity_curve.iloc[i] = equity_curve.iloc[i - 1] * (1 + returns.mean(axis=1).iloc[i])
+
+        trades = pd.DataFrame({
+            'Date': pd.date_range(start_date, end_date, freq='W'),
+            'Pair': np.random.choice([f"{a}/{b}" for a, b in zip(symbols[:-1], symbols[1:])], size=52),
+            'PnL': np.random.normal(100, 1000, 52),
+            'Duration': np.random.randint(1, 30, 52),
+            'Action': np.random.choice(['ENTRY', 'EXIT'], size=52)
+        })
+
+        spread = pd.Series(np.random.randn(len(prices)).cumsum(), index=prices.index)
+        z_scores = (spread - spread.rolling(20).mean()) / spread.rolling(20).std()
+
+        performance_metrics = {
+            'Sharpe Ratio': 1.8,
+            'Max Drawdown': -0.15,
+            'Annual Return': 0.25,
+            'Win Rate': 0.65,
+            'Avg Trade Duration': 12.5
+        }
+
+        optimization_results = pd.DataFrame({
+            'lookback': np.repeat([5, 10, 20, 30], 5),
+            'threshold': np.tile([1.0, 1.5, 2.0, 2.5, 3.0], 4),
+            'sharpe': np.random.uniform(0.5, 2.0, 20)
+        })
+
+        viz = PlotlyVisualizer(theme='plotly_white')
+
+        figures = {
+            'equity': viz.plot_equity_curve(
+                equity_curve,
+                title='Portfolio Performance',
+                output_file=f'{output_dir}/equity_curve.html'
+            ),
+
+            'metrics': viz.plot_performance_metrics(
+                performance_metrics,
+                title='Trading Performance Metrics',
+                output_file=f'{output_dir}/performance_metrics.html'
+            ),
+
+            'trades': viz.plot_trade_analysis(
+                trades,
+                title='Trading Analysis',
+                output_file=f'{output_dir}/trade_analysis.html'
+            ),
+
+            'correlations': viz.plot_pair_correlations(
+                returns,
+                title='Asset Correlations',
+                output_file=f'{output_dir}/correlations.html'
+            ),
+
+            'spread': viz.plot_spread_analysis(
+                spread,
+                z_scores,
+                trades,
+                title='Spread Analysis',
+                output_file=f'{output_dir}/spread_analysis.html'
+            ),
+
+            'optimization': viz.plot_optimization_results(
+                optimization_results,
+                param_cols=['lookback', 'threshold'],
+                metric_col='sharpe',
+                title='Strategy Optimization Results',
+                output_file=f'{output_dir}/optimization.html'
+            )
+        }
+
+        logger.info(f"Generated {len(figures)} visualizations in {output_dir}")
+
+        return {
+            'figures': figures,
+            'data': {
+                'equity_curve': equity_curve,
+                'trades': trades,
+                'returns': returns,
+                'spread': spread,
+                'z_scores': z_scores,
+                'metrics': performance_metrics,
+                'optimization': optimization_results
+            },
+            'visualizer': viz
+        }
+
+    except Exception as e:
+        logger.error(f"Error in visualization generation: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+
 
 if __name__ == "__main__":
-    main()
+    results = main()
+    if results is not None:
+        logger.info("Visualization examples completed successfully")
+        logger.info(f"Generated figures: {list(results['figures'].keys())}")
+    else:
+        logger.error("Visualization generation failed")

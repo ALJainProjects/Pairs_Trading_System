@@ -1,0 +1,68 @@
+Comparison of Top Pairs Across Different Periods
+============================================
+
+
+Top 10 Pairs for 7D Period:
+----------------------------------------
+ABNB - NFLX: p-value = 0.0000, half-life = 6.5 days
+AMD - DDOG: p-value = 0.0000, half-life = nan days
+AMD - MRVL: p-value = 0.0000, half-life = 10.5 days
+AMD - ODFL: p-value = 0.0000, half-life = 77.0 days
+ARM - FTNT: p-value = 0.0000, half-life = 7.9 days
+HON - MCHP: p-value = 0.0000, half-life = nan days
+MAR - MU: p-value = 0.0000, half-life = nan days
+TMUS - TXN: p-value = 0.0000, half-life = 9.6 days
+AMD - KLAC: p-value = 0.0000, half-life = 92.3 days
+ABNB - FAST: p-value = 0.0000, half-life = 5.7 days
+
+Top 10 Pairs for 1M Period:
+----------------------------------------
+ADSK - PAYX: p-value = 0.0000, half-life = 5.4 days
+AMGN - MDLZ: p-value = 0.0000, half-life = 8.2 days
+ANSS - MCHP: p-value = 0.0000, half-life = 10.8 days
+AVGO - MNST: p-value = 0.0000, half-life = 5.2 days
+CDW - PEP: p-value = 0.0000, half-life = 10.2 days
+CTSH - KHC: p-value = 0.0000, half-life = 9.0 days
+GFS - MELI: p-value = 0.0000, half-life = 10.1 days
+INTU - MSFT: p-value = 0.0000, half-life = 6.5 days
+ISRG - TMUS: p-value = 0.0000, half-life = 7.2 days
+MU - WBD: p-value = 0.0000, half-life = 6.7 days
+
+Top 10 Pairs for 3M Period:
+----------------------------------------
+INTU - KHC: p-value = 0.0002, half-life = 5.9 days
+CDW - TMUS: p-value = 0.0005, half-life = 6.7 days
+META - TMUS: p-value = 0.0007, half-life = 5.5 days
+CDW - KHC: p-value = 0.0011, half-life = 6.2 days
+EA - MDLZ: p-value = 0.0013, half-life = 5.1 days
+ASML - CDW: p-value = 0.0014, half-life = 5.5 days
+CTAS - TMUS: p-value = 0.0015, half-life = 5.5 days
+EA - KDP: p-value = 0.0018, half-life = 5.5 days
+ASML - CSGP: p-value = 0.0030, half-life = 7.1 days
+AVGO - TMUS: p-value = 0.0040, half-life = 8.2 days
+
+Top 10 Pairs for 6M Period:
+----------------------------------------
+AVGO - TMUS: p-value = 0.0002, half-life = 7.8 days
+NVDA - WDAY: p-value = 0.0002, half-life = 5.7 days
+INTC - TMUS: p-value = 0.0005, half-life = 5.8 days
+CSGP - KHC: p-value = 0.0006, half-life = 6.1 days
+MU - TMUS: p-value = 0.0017, half-life = 5.4 days
+AVGO - LULU: p-value = 0.0018, half-life = 5.8 days
+ABNB - TXN: p-value = 0.0026, half-life = 6.5 days
+AVGO - CTAS: p-value = 0.0036, half-life = 6.9 days
+NVDA - TMUS: p-value = 0.0044, half-life = 6.4 days
+AVGO - MSTR: p-value = 0.0044, half-life = 6.5 days
+
+Top 10 Pairs for 12M Period:
+----------------------------------------
+EXC - ZS: p-value = 0.0008, half-life = 5.6 days
+EXC - MU: p-value = 0.0010, half-life = 5.7 days
+BKNG - INTU: p-value = 0.0010, half-life = 6.4 days
+AMAT - AVGO: p-value = 0.0012, half-life = 5.2 days
+CDNS - VRTX: p-value = 0.0018, half-life = 10.9 days
+EXC - FAST: p-value = 0.0018, half-life = 6.3 days
+EXC - PDD: p-value = 0.0021, half-life = 6.8 days
+ABNB - CSCO: p-value = 0.0022, half-life = 13.7 days
+COST - CTAS: p-value = 0.0025, half-life = 6.7 days
+CTSH - MAR: p-value = 0.0026, half-life = 5.0 days

@@ -1,0 +1,24 @@
+Clustering Method: graph_correlation
+==================================================
+
+Cluster 1 (9 assets):
+NXPI, AMAT, KLAC, TXN, MCHP, LRCX, ON, ASML, ADI
+
+Cluster 2 (2 assets):
+PAYX, ADP
+
+Cluster 3 (2 assets):
+XEL, AEP
+
+Cluster 4 (2 assets):
+NVDA, AMD
+
+Cluster 5 (2 assets):
+SNPS, CDNS
+
+Cluster 6 (2 assets):
+MDB, DDOG
+
+Cluster 7 (2 assets):
+GOOGL, GOOG
+

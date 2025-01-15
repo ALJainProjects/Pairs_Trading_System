@@ -14,10 +14,8 @@ import pandas as pd
 import numpy as np
 from scipy.linalg import pinv
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from scipy import stats
 from typing import Dict, List, Tuple, Optional, Union, Any
-import os
 from pathlib import Path
 import warnings
 from dataclasses import dataclass
@@ -27,18 +25,16 @@ from functools import lru_cache
 
 from statsmodels.stats.multitest import multipletests
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configuration
 @dataclass
 class CorrelationConfig:
     """Configuration for correlation analysis."""
     CORRELATION_THRESHOLDS: Dict[str, float] = None
-    MIN_OBSERVATIONS: int = 30  # Minimum sample size for statistical significance
+    MIN_OBSERVATIONS: int = 30
     DEFAULT_WINDOW: int = 63
-    MAX_ASSETS_DISPLAY: int = 50
+    MAX_ASSETS_DISPLAY: int = 150
     TIMEOUT_SECONDS: int = 300
 
     def __post_init__(self):
@@ -59,9 +55,9 @@ class CalculationError(Exception):
 
 def validate_pair_name(asset1: str, asset2: str) -> str:
     """Create a unique and safe pair identifier."""
-    return f"{asset1}|||{asset2}"  # Using triple pipe as unlikely delimiter
+    return f"{asset1}|||{asset2}"
 
-def parse_pair_name(pair_name: str) -> Tuple[str, str]:
+def parse_pair_name(pair_name: str) -> Any:
     """Parse pair identifier back into asset names."""
     return tuple(pair_name.split('|||'))
 
@@ -112,7 +108,6 @@ class CorrelationAnalyzer:
                 f"Insufficient observations. Need at least {self.config.MIN_OBSERVATIONS}"
             )
 
-        # Check for constant columns
         zero_var_cols = returns.columns[returns.std() == 0]
         if not zero_var_cols.empty:
             raise DataValidationError(
@@ -150,15 +145,12 @@ class CorrelationAnalyzer:
         try:
             logger.info("Calculating partial correlation matrix.")
 
-            # Calculate covariance and its pseudo-inverse for better numerical stability
             cov = self.returns.cov().values
             prec = pinv(cov)
 
-            # Calculate partial correlations
             d = np.sqrt(np.diag(prec))
             d_outer = np.outer(d, d)
 
-            # Avoid division by zero
             mask = d_outer != 0
             partial_corr = np.zeros_like(prec)
             partial_corr[mask] = -prec[mask] / d_outer[mask]
@@ -198,7 +190,6 @@ class CorrelationAnalyzer:
             rolling_corrs = {}
             n_assets = len(self.returns.columns)
 
-            # Pre-calculate all combinations to avoid nested loops
             combinations = [
                 (i, j) for i in range(n_assets)
                 for j in range(i + 1, n_assets)
@@ -254,7 +245,6 @@ class CorrelationAnalyzer:
             else:
                 raise ValueError("correlation_type must be 'pearson' or 'partial'")
 
-            # Vectorized operations for better performance
             mask = np.triu(np.abs(corr_matrix) >= threshold, k=1)
             pairs = []
 
@@ -295,7 +285,6 @@ class CorrelationAnalyzer:
             for pair, rolling_corr in self.rolling_corr_.items():
                 asset1, asset2 = parse_pair_name(pair)
 
-                # Calculate metrics with handling for NaN values
                 metrics = {
                     'asset1': asset1,
                     'asset2': asset2,
@@ -303,7 +292,7 @@ class CorrelationAnalyzer:
                     'std': rolling_corr.std(),
                     'min': rolling_corr.min(),
                     'max': rolling_corr.max(),
-                    'negative_pct': (rolling_corr < 0).mean() * 100,
+                    'negative_pct': np.array((rolling_corr < 0)).mean() * 100,
                     'missing_pct': rolling_corr.isna().mean() * 100
                 }
                 stability_metrics[pair] = metrics
@@ -312,6 +301,18 @@ class CorrelationAnalyzer:
 
         except Exception as e:
             raise CalculationError(f"Failed to analyze correlation stability: {str(e)}")
+
+    @staticmethod
+    def _validate_pair_name(asset1: str, asset2: str) -> str:
+        """Create a unique and safe pair identifier."""
+        return f"{min(asset1, asset2)}|||{max(asset1, asset2)}"
+
+    def get_pair_rolling_correlation(self, asset1: str, asset2: str) -> pd.Series:
+        """Get rolling correlation for a specific pair."""
+        pair_name = self._validate_pair_name(asset1, asset2)
+        if self.rolling_corr_ is None:
+            self.calculate_rolling_correlation()
+        return self.rolling_corr_.get(pair_name)
 
     def determine_correlation_significance(self,
                                    correlation_type: str = 'pearson',
@@ -322,7 +323,6 @@ class CorrelationAnalyzer:
         Args:
             correlation_type (str): 'pearson' or 'partial'
             alpha (float): Significance level
-            adjust_pvalues (bool): Whether to apply multiple testing correction
 
         Returns:
             pd.DataFrame: P-values for correlation tests
@@ -350,9 +350,7 @@ class CorrelationAnalyzer:
                 columns=corr_matrix.columns
             )
 
-            # Vectorized calculation of t-statistics and p-values
             corr_values = corr_matrix.values
-            # Avoid division by zero
             denom = np.sqrt(1 - corr_values**2)
             denom[denom == 0] = np.inf
 
@@ -396,7 +394,6 @@ class CorrelationAnalyzer:
             else:
                 raise ValueError("correlation_type must be 'pearson' or 'partial'")
 
-            # Handle large number of assets
             if len(corr_matrix.columns) > self.config.MAX_ASSETS_DISPLAY:
                 warnings.warn(
                     f"Large number of assets ({len(corr_matrix.columns)}). "
@@ -448,7 +445,6 @@ class CorrelationAnalyzer:
                 self.calculate_rolling_correlation(window)
 
             if pairs is None:
-                # Get top 5 most correlated pairs
                 highly_corr = self.get_highly_correlated_pairs()
                 pairs = [(row['asset1'], row['asset2'])
                         for _, row in highly_corr.head().iterrows()]
@@ -535,23 +531,19 @@ class DataLoader:
                 ticker = file.stem
                 df = pd.read_csv(file)
 
-                # Validate columns
                 missing_cols = set(required_columns) - set(df.columns)
                 if missing_cols:
                     errors.append(f"Missing columns in {file.name}: {missing_cols}")
                     continue
 
-                # Process dates
                 df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
                 df = df.dropna(subset=['Date'])
                 df.set_index('Date', inplace=True)
 
-                # Convert prices to numeric, logging any conversion errors
                 close_prices = pd.to_numeric(df['Close'], errors='coerce')
                 if close_prices.isna().any():
                     errors.append(f"Non-numeric values in Close column of {file.name}")
 
-                # Check sufficient history
                 if len(close_prices) < min_history:
                     errors.append(f"Insufficient history for {ticker}: {len(close_prices)} days")
                     continue
@@ -564,18 +556,14 @@ class DataLoader:
         if not prices_dict:
             raise ValueError("No valid price data loaded. Errors: " + "\n".join(errors))
 
-        # Combine all prices into a DataFrame
         prices_df = pd.DataFrame(prices_dict)
 
-        # Handle missing values
         missing_pct = prices_df.isnull().mean()
         if (missing_pct > 0.1).any():
             warnings.warn("Some assets have >10% missing data")
 
-        # Forward fill then backward fill missing values
         prices_df = prices_df.ffill().bfill()
 
-        # Drop any remaining columns with missing values
         prices_df = prices_df.dropna(axis=1)
 
         logger.info(f"Successfully loaded data for {len(prices_df.columns)} assets")
@@ -600,30 +588,24 @@ def run_correlation_analysis(prices_df: pd.DataFrame,
     plots_dir = output_dir / "plots"
     results_dir = output_dir / "results"
 
-    # Create directories
     for directory in [output_dir, plots_dir, results_dir]:
         directory.mkdir(parents=True, exist_ok=True)
 
-    # Calculate returns
     returns = prices_df.pct_change().dropna()
 
-    # Initialize analyzer
     analyzer = CorrelationAnalyzer(returns, config)
 
     try:
-        # Calculate correlations
         pearson_corr = analyzer.calculate_pearson_correlation()
         partial_corr = analyzer.calculate_partial_correlation()
         rolling_corr = analyzer.calculate_rolling_correlation()
 
-        # Plot correlation matrices
         pearson_fig = analyzer.plot_correlation_matrix('pearson')
         partial_fig = analyzer.plot_correlation_matrix('partial')
 
         pearson_fig.write_html(plots_dir / "pearson_correlation.html")
         partial_fig.write_html(plots_dir / "partial_correlation.html")
 
-        # Get highly correlated pairs for different thresholds
         correlation_results = {}
         for threshold_name, threshold in config.CORRELATION_THRESHOLDS.items():
             pearson_pairs = analyzer.get_highly_correlated_pairs('pearson', threshold)
@@ -635,11 +617,9 @@ def run_correlation_analysis(prices_df: pd.DataFrame,
             pearson_pairs.to_csv(results_dir / f"pearson_pairs_{threshold_name}.csv")
             partial_pairs.to_csv(results_dir / f"partial_pairs_{threshold_name}.csv")
 
-        # Analyze correlation stability
         stability = analyzer.analyze_correlation_stability()
         stability.to_csv(results_dir / "correlation_stability.csv")
 
-        # Plot rolling correlations for different correlation levels
         for threshold_name, pairs_df in correlation_results.items():
             if len(pairs_df) > 0:
                 top_pairs = [(row['asset1'], row['asset2'])
@@ -647,14 +627,20 @@ def run_correlation_analysis(prices_df: pd.DataFrame,
                 rolling_fig = analyzer.plot_rolling_correlations(top_pairs)
                 rolling_fig.write_html(plots_dir / f"rolling_correlations_{threshold_name}.html")
 
-        # Test correlation significance
-        pvalues_pearson = analyzer.determine_correlation_significance('pearson')
-        pvalues_partial = analyzer.determine_correlation_significance('partial')
+        pvalues_pearson = pd.DataFrame(
+            analyzer.determine_correlation_significance('pearson'),
+            index=analyzer.returns.columns,
+            columns=analyzer.returns.columns
+        )
+        pvalues_partial = pd.DataFrame(
+            analyzer.determine_correlation_significance('partial'),
+            index=analyzer.returns.columns,
+            columns=analyzer.returns.columns
+        )
 
         pvalues_pearson.to_csv(results_dir / "pearson_pvalues.csv")
         pvalues_partial.to_csv(results_dir / "partial_pvalues.csv")
 
-        # Generate summary report
         _write_summary_report(
             analyzer=analyzer,
             output_dir=output_dir,
@@ -670,28 +656,26 @@ def run_correlation_analysis(prices_df: pd.DataFrame,
 
 
 def _write_summary_report(analyzer: CorrelationAnalyzer,
-                         output_dir: Path,
-                         correlation_results: Dict,
-                         pvalues_pearson: pd.DataFrame,
-                         pvalues_partial: pd.DataFrame,
-                         stability: pd.DataFrame) -> None:
+                          output_dir: Path,
+                          correlation_results: Dict,
+                          pvalues_pearson: pd.DataFrame,
+                          pvalues_partial: pd.DataFrame,
+                          stability: pd.DataFrame) -> None:
     """Write summary report of correlation analysis."""
-    with open(output_dir / "correlation_analysis.txt", "w") as f:
+    with open(output_dir / "correlation_analysis.txt", "w", encoding="utf-8") as f:
         f.write("Correlation Analysis Summary\n")
         f.write("==========================\n\n")
 
-        # Overall statistics
         f.write("Overall Statistics:\n")
         f.write("-" * 20 + "\n")
         f.write(f"Number of assets analyzed: {len(analyzer.returns.columns)}\n")
         f.write(f"Time period: {analyzer.returns.index[0]} to {analyzer.returns.index[-1]}\n")
         f.write(f"Number of observations: {len(analyzer.returns)}\n\n")
 
-        # Pearson correlation analysis
         f.write("\nPearson Correlation Analysis:\n")
         f.write("-" * 30 + "\n")
         f.write(f"Number of significant pairs (p < 0.05): "
-                f"{(pvalues_pearson < 0.05).sum().sum() // 2}\n")
+                f"{np.array((pvalues_pearson < 0.05)).sum().sum() // 2}\n")
 
         for threshold_name, threshold in analyzer.config.CORRELATION_THRESHOLDS.items():
             pairs_df = correlation_results[f'pearson_{threshold_name}']
@@ -702,11 +686,10 @@ def _write_summary_report(analyzer: CorrelationAnalyzer,
                 for _, row in pairs_df.head().iterrows():
                     f.write(f"  {row['asset1']} - {row['asset2']}: {row['correlation']:.3f}\n")
 
-        # Partial correlation analysis
         f.write("\nPartial Correlation Analysis:\n")
         f.write("-" * 30 + "\n")
         f.write(f"Number of significant pairs (p < 0.05): "
-                f"{(pvalues_partial < 0.05).sum().sum() // 2}\n")
+                f"{np.array((pvalues_partial < 0.05)).sum().sum() // 2}\n")
 
         for threshold_name, threshold in analyzer.config.CORRELATION_THRESHOLDS.items():
             pairs_df = correlation_results[f'partial_{threshold_name}']
@@ -717,7 +700,6 @@ def _write_summary_report(analyzer: CorrelationAnalyzer,
                 for _, row in pairs_df.head().iterrows():
                     f.write(f"  {row['asset1']} - {row['asset2']}: {row['correlation']:.3f}\n")
 
-        # Correlation stability analysis
         f.write("\nCorrelation Stability Analysis:\n")
         f.write("-" * 30 + "\n")
         f.write("Summary Statistics:\n")
@@ -725,7 +707,6 @@ def _write_summary_report(analyzer: CorrelationAnalyzer,
         f.write(f"Average correlation volatility: {stability['std'].mean():.3f}\n")
         f.write(f"Average negative correlation percentage: {stability['negative_pct'].mean():.1f}%\n")
 
-        # Most stable pairs
         stable_pairs = stability.sort_values('std')
         f.write("\nMost Stable Correlation Pairs:\n")
         for idx in stable_pairs.head().index:
@@ -734,19 +715,15 @@ def _write_summary_report(analyzer: CorrelationAnalyzer,
 
 
 if __name__ == "__main__":
-    # Example usage
     try:
         data_dir = Path(r'C:\Users\arnav\Downloads\pairs_trading_system\data\raw')
         output_dir = Path("correlation_analysis")
 
-        # Initialize configuration
         config = CorrelationConfig()
 
-        # Load data
         loader = DataLoader(data_dir)
         prices_df = loader.load_stock_data()
 
-        # Run analysis
         run_correlation_analysis(prices_df, output_dir, config)
 
         logger.info("Correlation analysis completed successfully")

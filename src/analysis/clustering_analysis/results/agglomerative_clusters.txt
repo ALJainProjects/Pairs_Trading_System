@@ -1,0 +1,18 @@
+Clustering Method: agglomerative
+==================================================
+
+Cluster 1 (87 assets):
+AAPL, ADBE, ADI, ADP, ADSK, AEP, AMAT, AMD, AMGN, AMZN, ANSS, ARM, ASML, AVGO, AXON, AZN, BIIB, BKNG, BKR, CCEP, CDNS, CDW, CEG, CHTR, CMCSA, COST, CPRT, CSCO, CSGP, CSX, CTAS, CTSH, DXCM, EA, EXC, FANG, FAST, FTNT, GEHC, GFS, GILD, GOOG, GOOGL, HON, IDXX, INTC, INTU, ISRG, KDP, KHC, KLAC, LIN, LRCX, LULU, MAR, MCHP, MDLZ, META, MNST, MRVL, MSFT, MU, NFLX, NVDA, NXPI, ODFL, ON, ORLY, PANW, PAYX, PCAR, PEP, QCOM, REGN, ROP, ROST, SBUX, SNPS, TMUS, TSLA, TTWO, TXN, VRSK, VRTX, WBD, WDAY, XEL
+
+Cluster 2 (11 assets):
+ABNB, CRWD, DASH, DDOG, MDB, MELI, PLTR, PYPL, TEAM, TTD, ZS
+
+Cluster 3 (1 assets):
+MSTR
+
+Cluster 4 (1 assets):
+PDD
+
+Cluster 5 (1 assets):
+APP
+

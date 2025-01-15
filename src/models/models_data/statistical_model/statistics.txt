@@ -1,0 +1,33 @@
+Summary Statistics:
+
+OLS Spread Statistics:
+count    1.004000e+03
+mean     1.603392e-13
+std      1.460050e+01
+min     -4.309171e+01
+25%     -1.023020e+01
+50%      3.151831e+00
+75%      9.582830e+00
+max      4.214990e+01
+
+Ratio Spread Statistics:
+count    1004.000000
+mean        0.533600
+std         0.049275
+min         0.396399
+25%         0.505694
+50%         0.540562
+75%         0.566458
+max         0.660578
+
+Signal Counts:
+
+OLS Signals:
+ 0.0    900
+-1.0     59
+ 1.0     45
+
+Ratio Signals:
+ 0.0    893
+-1.0     65
+ 1.0     46

@@ -20,7 +20,7 @@ Features:
 - Dimensionality reduction for high-dimensional feature spaces
 - Robust error handling and validation
 """
-
+import random
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
@@ -29,23 +29,37 @@ from sklearn.metrics import mutual_info_score, pairwise_distances
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.decomposition import PCA
 from statsmodels.tsa.stattools import coint
-from scipy.stats import spearmanr
 from dtaidistance import dtw
 import networkx as nx
 import plotly.graph_objects as go
 from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import warnings
 from config.logging_config import logger
 import os
 
-# Configuration
 SIMILARITY_METRICS = {
     'correlation': 'correlation',
     'mutual_info': 'mutual_info',
     'dtw': 'dtw',
     'cosine': 'cosine'
 }
+
+def calculate_coint_work(
+    prices: pd.DataFrame,
+    pair: Tuple[int, int]
+) -> Tuple[int, int, float]:
+    i, j = pair
+    _, pvalue, _ = coint(prices.iloc[:, i], prices.iloc[:, j])
+    return i, j, pvalue
+
+def calculate_dtw_work(
+    i: int,
+    j: int,
+    series_i: np.ndarray,
+    series_j: np.ndarray
+) -> Tuple[int, int, float]:
+    dist = dtw.distance_fast(series_i, series_j)
+    return i, j, dist
 
 class AssetClusteringAnalyzer:
     """Main class for asset clustering analysis."""
@@ -73,12 +87,13 @@ class AssetClusteringAnalyzer:
         elif metric == 'mutual_info':
             return self._mutual_information(returns, **kwargs)
         elif metric == 'dtw':
-            return -self._dtw_distance_matrix(returns)  # Negative for similarity
+            return -self._dtw_distance_matrix(returns)
         elif metric == 'cosine':
             return self._cosine_similarity_matrix(returns)
         else:
             raise ValueError(f"Unknown similarity metric: {metric}")
 
+    # noinspection PyTypeChecker
     def _mutual_information(self, returns: pd.DataFrame,
                           n_bins: int = 10) -> pd.DataFrame:
         """Calculate mutual information between assets."""
@@ -93,8 +108,7 @@ class AssetClusteringAnalyzer:
         mi_matrix = pd.DataFrame(np.zeros((n_assets, n_assets)),
                                index=columns, columns=columns)
 
-        # Parallel computation of mutual information
-        with ProcessPoolExecutor(max_workers=self.n_jobs) as executor:
+        with ProcessPoolExecutor(max_workers=4) as executor:
             futures = []
             for i in range(n_assets):
                 for j in range(i + 1, n_assets):
@@ -106,7 +120,6 @@ class AssetClusteringAnalyzer:
                         )
                     )
 
-            # Collect results
             idx = 0
             for i in range(n_assets):
                 for j in range(i + 1, n_assets):
@@ -133,18 +146,17 @@ class AssetClusteringAnalyzer:
         n_assets = len(columns)
         distance_mat = np.zeros((n_assets, n_assets))
 
-        def calculate_dtw(i: int, j: int) -> Tuple[int, int, float]:
-            dist = dtw.distance_fast(returns.iloc[:, i].values,
-                                   returns.iloc[:, j].values)
-            return i, j, dist
+        # def calculate_dtw(i: int, j: int) -> Tuple[int, int, float]:
+        #     dist = dtw.distance_fast(returns.iloc[:, i].values,
+        #                            returns.iloc[:, j].values)
+        #     return i, j, dist
 
-        # Parallel computation of DTW distances
-        with ProcessPoolExecutor(max_workers=self.n_jobs) as executor:
+        with ProcessPoolExecutor(max_workers=4) as executor:
             futures = []
             for i in range(n_assets):
                 for j in range(i + 1, n_assets):
                     futures.append(
-                        executor.submit(calculate_dtw, i, j)
+                        executor.submit(calculate_dtw_work, i, j, returns.iloc[:, i].values, returns.iloc[:, j].values)
                     )
 
             for future in as_completed(futures):
@@ -152,6 +164,8 @@ class AssetClusteringAnalyzer:
                 distance_mat[i, j] = dist
                 distance_mat[j, i] = dist
 
+        # print(pd.DataFrame(distance_mat, index=columns, columns=columns))
+        pd.DataFrame(distance_mat, index=columns, columns=columns).to_csv('clustering_analysis/results/dtw_matrix.csv')
         return pd.DataFrame(distance_mat, index=columns, columns=columns)
 
     def calculate_cointegration_matrix(self, prices: pd.DataFrame,
@@ -167,19 +181,17 @@ class AssetClusteringAnalyzer:
         n = len(prices.columns)
         pvalue_matrix = np.zeros((n, n))
 
-        # Create pairs list
         pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
         if max_pairs and len(pairs) > max_pairs:
-            pairs = np.random.choice(pairs, max_pairs, replace=False)
+            pairs = random.sample(pairs, max_pairs)
 
-        def calculate_coint(pair: Tuple[int, int]) -> Tuple[int, int, float]:
-            i, j = pair
-            _, pvalue, _ = coint(prices.iloc[:, i], prices.iloc[:, j])
-            return i, j, pvalue
+        # def calculate_coint(pair: Tuple[int, int]) -> Tuple[int, int, float]:
+        #     i, j = pair
+        #     _, pvalue, _ = coint(prices.iloc[:, i], prices.iloc[:, j])
+        #     return i, j, pvalue
 
-        # Parallel computation of cointegration
-        with ProcessPoolExecutor(max_workers=self.n_jobs) as executor:
-            futures = [executor.submit(calculate_coint, pair) for pair in pairs]
+        with ProcessPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(calculate_coint_work, prices, pair) for pair in pairs]
 
             for future in as_completed(futures):
                 i, j, pvalue = future.result()
@@ -201,7 +213,6 @@ class AssetClusteringAnalyzer:
         """
         self._validate_input(prices)
 
-        # Prepare features
         scaler = StandardScaler()
         scaled_prices = pd.DataFrame(
             scaler.fit_transform(prices),
@@ -209,19 +220,16 @@ class AssetClusteringAnalyzer:
             index=prices.index
         )
 
-        # Calculate returns and other features
         returns = prices.pct_change().dropna()
         volatility = returns.std()
         correlation = returns.corr()
 
-        # Combine features
         features = np.column_stack([
             scaled_prices.T,
             volatility.values.reshape(-1, 1),
             correlation.values
         ])
 
-        # Apply PCA if needed
         if n_components is not None:
             pca = PCA(n_components=n_components, random_state=self.random_state)
             features = pca.fit_transform(features)
@@ -230,12 +238,10 @@ class AssetClusteringAnalyzer:
                 index=[f'PC{i+1}' for i in range(n_components)]
             )
 
-        # Apply clustering
         kmeans = KMeans(n_clusters=n_clusters, random_state=self.random_state,
                        n_init=10)
         labels = kmeans.fit_predict(features)
 
-        # Form clusters
         clusters = []
         for i in range(n_clusters):
             cluster_assets = prices.columns[labels == i].tolist()
@@ -251,15 +257,14 @@ class AssetClusteringAnalyzer:
 
         if use_cointegration:
             dist_matrix = self.calculate_cointegration_matrix(prices)
+            dist_matrix = 1 - dist_matrix
         else:
             returns = prices.pct_change().dropna()
             dist_matrix = 1 - returns.corr()
 
-        # Apply clustering
         dbs = DBSCAN(eps=eps, min_samples=min_samples, metric=metric)
         labels = dbs.fit_predict(dist_matrix)
 
-        # Form clusters (excluding noise points)
         clusters = []
         for label in set(labels):
             if label == -1:
@@ -280,10 +285,8 @@ class AssetClusteringAnalyzer:
         """
         self._validate_input(prices)
 
-        # Prepare features
         returns = prices.pct_change().dropna()
         if metric == 'precomputed':
-            # Use correlation-based distance
             dist_matrix = 1 - returns.corr()
             agglom = AgglomerativeClustering(
                 n_clusters=n_clusters,
@@ -292,7 +295,6 @@ class AssetClusteringAnalyzer:
             )
             labels = agglom.fit_predict(dist_matrix)
         else:
-            # Use return series directly
             agglom = AgglomerativeClustering(
                 n_clusters=n_clusters,
                 metric=metric,
@@ -300,7 +302,6 @@ class AssetClusteringAnalyzer:
             )
             labels = agglom.fit_predict(returns.T)
 
-        # Form clusters
         clusters = []
         for i in range(n_clusters):
             cluster_assets = prices.columns[labels == i].tolist()
@@ -312,17 +313,14 @@ class AssetClusteringAnalyzer:
                              threshold: float = 0.8,
                              min_cluster_size: int = 2) -> List[List[str]]:
         """Identify clusters using graph-based approach with minimum size."""
-        # Create graph
         G = nx.Graph()
         G.add_nodes_from(similarity_matrix.columns)
 
-        # Add edges for similarities above threshold
         for i in similarity_matrix.columns:
             for j in similarity_matrix.columns:
                 if i != j and similarity_matrix.loc[i, j] >= threshold:
                     G.add_edge(i, j)
 
-        # Find connected components as clusters
         clusters = [list(component) for component in nx.connected_components(G)
                    if len(component) >= min_cluster_size]
 
@@ -342,10 +340,8 @@ class AssetClusteringAnalyzer:
                 'silhouette_score': 0
             }
 
-        # Calculate cluster statistics
         cluster_sizes = [len(cluster) for cluster in clusters]
 
-        # Calculate average intra-cluster similarity
         intra_sims = []
         for cluster in clusters:
             if len(cluster) > 1:
@@ -383,17 +379,14 @@ class AssetClusteringAnalyzer:
                             clusters: List[List[str]],
                             title: str = "Clustered Heatmap") -> go.Figure:
         """Plot clustered heatmap of similarity/cointegration matrix."""
-        # Create ordered list based on clusters
         ordered = []
         for cluster in clusters:
             ordered.extend(cluster)
         remaining = [c for c in matrix.columns if c not in ordered]
         ordered.extend(remaining)
 
-        # Reorder matrix
         ordered_matrix = matrix.loc[ordered, ordered]
 
-        # Create heatmap with cluster boundaries
         fig = go.Figure(data=go.Heatmap(
             z=ordered_matrix.values,
             x=ordered_matrix.columns,
@@ -403,14 +396,12 @@ class AssetClusteringAnalyzer:
             showscale=True
         ))
 
-        # Add cluster boundaries
         current_idx = 0
         shapes = []
         for cluster in clusters:
             cluster_size = len(cluster)
             if cluster_size > 1:
                 shapes.extend([
-                    # Horizontal lines
                     dict(
                         type="line",
                         x0=-0.5,
@@ -427,7 +418,6 @@ class AssetClusteringAnalyzer:
                         y1=current_idx + cluster_size - 0.5,
                         line=dict(color="black", width=2)
                     ),
-                    # Vertical lines
                     dict(
                         type="line",
                         x0=current_idx - 0.5,
@@ -447,7 +437,6 @@ class AssetClusteringAnalyzer:
                 ])
             current_idx += cluster_size
 
-        # Update layout
         fig.update_layout(
             title=title,
             xaxis_title="Assets",
@@ -457,27 +446,22 @@ class AssetClusteringAnalyzer:
             shapes=shapes
         )
 
-        # Rotate x-axis labels for better readability
         fig.update_xaxes(tickangle=45)
 
         return fig
 
 def main():
     """Main execution function."""
-    # Create output directory
     output_dir = "clustering_analysis"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Initialize analyzer
     analyzer = AssetClusteringAnalyzer(n_jobs=-1, random_state=42)
 
     try:
-        # Load data
         logger.info("Loading price data...")
         prices_df = load_nasdaq100_data(r'C:\Users\arnav\Downloads\pairs_trading_system\data\raw')
         returns = prices_df.pct_change().dropna()
 
-        # Calculate similarity matrices using different metrics
         similarity_matrices = {
             'correlation': analyzer.calculate_similarity_matrix(
                 returns, metric='correlation'
@@ -490,20 +474,19 @@ def main():
             )
         }
 
-        # Add DTW with a warning about computation time
         try:
             similarity_matrices['dtw'] = analyzer.calculate_similarity_matrix(
                 returns, metric='dtw'
             )
+            similarity_matrices['dtw'] *= -1
         except Exception as e:
             logger.warning(f"DTW calculation failed: {str(e)}")
 
-        # Apply different clustering methods
         clustering_results = {
             'kmeans': analyzer.kmeans_clustering(
                 prices_df,
                 n_clusters=5,
-                n_components=10  # Reduce dimensionality
+                n_components=10
             ),
             'dbscan': analyzer.dbscan_clustering(
                 prices_df,
@@ -515,11 +498,10 @@ def main():
                 prices_df,
                 n_clusters=5,
                 metric='euclidean',
-                linkage='complete'  # Changed from 'ward'
+                linkage='complete'
             )
         }
 
-        # Add graph-based clustering for each similarity metric
         for metric_name, sim_matrix in similarity_matrices.items():
             clustering_results[f'graph_{metric_name}'] = \
                 analyzer.graph_based_clustering(
@@ -528,28 +510,24 @@ def main():
                     min_cluster_size=2
                 )
 
-        # Create output directories
         plots_dir = os.path.join(output_dir, "plots")
         results_dir = os.path.join(output_dir, "results")
         os.makedirs(plots_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
 
-        # Analyze and visualize results
         analysis_results = {}
 
         for method_name, clusters in clustering_results.items():
-            # Choose appropriate similarity matrix for analysis
+            # print(method_name)
             if method_name.startswith('graph_'):
-                metric = method_name.split('_')[1]
+                metric = method_name.split('_', 1)[1]
                 sim_matrix = similarity_matrices[metric]
             else:
                 sim_matrix = similarity_matrices['correlation']
 
-            # Analyze clusters
             analysis = analyzer.analyze_clusters(clusters, sim_matrix)
             analysis_results[method_name] = analysis
 
-            # Create visualizations
             fig = analyzer.plot_cluster_heatmap(
                 sim_matrix,
                 clusters,
@@ -557,7 +535,6 @@ def main():
             )
             fig.write_html(os.path.join(plots_dir, f"{method_name}_clusters.html"))
 
-            # Save cluster compositions
             with open(os.path.join(results_dir, f"{method_name}_clusters.txt"), "w") as f:
                 f.write(f"Clustering Method: {method_name}\n")
                 f.write("=" * 50 + "\n\n")
@@ -565,7 +542,6 @@ def main():
                     f.write(f"Cluster {i + 1} ({len(cluster)} assets):\n")
                     f.write(", ".join(cluster) + "\n\n")
 
-        # Create summary report
         with open(os.path.join(output_dir, "clustering_summary.txt"), "w") as f:
             f.write("Clustering Analysis Summary\n")
             f.write("=========================\n\n")
@@ -579,14 +555,12 @@ def main():
                     else:
                         f.write(f"{key}: {value}\n")
 
-            # Add feature importance information for KMeans
             if 'kmeans_pca' in analyzer.feature_importances_:
                 f.write("\nPCA Component Importance (K-Means):\n")
                 f.write("-" * 40 + "\n")
                 for idx, imp in analyzer.feature_importances_['kmeans_pca'].items():
                     f.write(f"{idx}: {imp:.3f}\n")
 
-        # Save numerical results to CSV
         summary_data = []
         for method_name, analysis in analysis_results.items():
             row = {'method': method_name}
@@ -596,7 +570,6 @@ def main():
         summary_df = pd.DataFrame(summary_data)
         summary_df.to_csv(os.path.join(results_dir, "clustering_summary.csv"), index=False)
 
-        # Compare cluster stability across methods
         stability_results = []
         methods = list(clustering_results.keys())
 
@@ -606,11 +579,9 @@ def main():
                 clusters1 = clustering_results[method1]
                 clusters2 = clustering_results[method2]
 
-                # Convert clusters to sets for comparison
                 sets1 = {frozenset(cluster) for cluster in clusters1}
                 sets2 = {frozenset(cluster) for cluster in clusters2}
 
-                # Calculate Jaccard similarity
                 intersection = len(sets1.intersection(sets2))
                 union = len(sets1.union(sets2))
                 stability = intersection / union if union > 0 else 0
@@ -621,7 +592,6 @@ def main():
                     'stability': stability
                 })
 
-        # Save stability analysis
         stability_df = pd.DataFrame(stability_results)
         stability_df.to_csv(os.path.join(results_dir, "cluster_stability.csv"), index=False)
 

@@ -34,7 +34,7 @@ class DatabaseManager:
         try:
             data = data.copy()
             data["ticker"] = ticker
-            # rename as needed to match DB columns
+
             data.rename(
                 columns={
                     "Open": "open",

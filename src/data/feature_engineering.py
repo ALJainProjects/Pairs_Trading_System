@@ -54,7 +54,7 @@ class FeatureEngineer:
         if self.fill_method == 'drop':
             df = df.dropna(subset=feature_columns)
         elif self.fill_method == 'backfill':
-            df[feature_columns] = df[feature_columns].fillna(method='bfill')
+            df[feature_columns] = df[feature_columns].bfill()
         elif self.fill_method is not None:
             raise ValueError(f"Unknown fill method: {self.fill_method}")
 
@@ -63,7 +63,7 @@ class FeatureEngineer:
     def add_moving_average(self,
                            df: pd.DataFrame,
                            window: int = 20,
-                           column: str = "close",
+                           column: str = "Close",
                            ma_type: str = "simple") -> pd.DataFrame:
         """
         Add moving average with configurable type.
@@ -91,7 +91,7 @@ class FeatureEngineer:
             df[ma_col] = df[column].rolling(
                 window=window,
                 min_periods=min_periods
-            ).apply(lambda x: np.sum(weights * x) / weights.sum())
+            ).apply(lambda x: np.sum(weights[:len(x)] * x) / weights[:len(x)].sum(), raw=True)
         elif ma_type == 'exp':
             df[ma_col] = df[column].ewm(
                 span=window,
@@ -106,7 +106,7 @@ class FeatureEngineer:
     def add_rsi(self,
                 df: pd.DataFrame,
                 window: int = 14,
-                column: str = "close",
+                column: str = "Close",
                 method: str = "wilder") -> pd.DataFrame:
         """
         Add RSI with configurable calculation method.
@@ -123,11 +123,9 @@ class FeatureEngineer:
         df = df.copy()
         min_periods = self.min_periods or window
 
-        # Calculate price changes
         delta = df[column].diff()
 
         if method == 'wilder':
-            # Wilder's smoothing
             gain = delta.where(delta > 0, 0).ewm(
                 alpha=1 / window,
                 min_periods=min_periods,
@@ -139,7 +137,6 @@ class FeatureEngineer:
                 adjust=False
             ).mean()
         elif method == 'cutler':
-            # Cutler's RSI
             gain = delta.where(delta > 0, 0).rolling(
                 window=window,
                 min_periods=min_periods
@@ -151,7 +148,7 @@ class FeatureEngineer:
         else:
             raise ValueError(f"Unknown RSI method: {method}")
 
-        rs = gain / (loss + 1e-12)  # Avoid division by zero
+        rs = gain / (loss + 1e-12)
         df["RSI"] = 100 - (100 / (1 + rs))
 
         return self._handle_nans(df, ["RSI"])
@@ -161,7 +158,7 @@ class FeatureEngineer:
                  fast_period: int = 12,
                  slow_period: int = 26,
                  signal_period: int = 9,
-                 column: str = "close") -> pd.DataFrame:
+                 column: str = "Close") -> pd.DataFrame:
         """Add MACD indicator."""
         if self.validate:
             self._validate_data(df, [column])
@@ -169,7 +166,6 @@ class FeatureEngineer:
         df = df.copy()
         min_periods = self.min_periods or slow_period
 
-        # Calculate EMAs
         fast_ema = df[column].ewm(
             span=fast_period,
             min_periods=min_periods,
@@ -181,7 +177,6 @@ class FeatureEngineer:
             adjust=False
         ).mean()
 
-        # Calculate MACD and Signal line
         df["MACD"] = fast_ema - slow_ema
         df["Signal_Line"] = df["MACD"].ewm(
             span=signal_period,
@@ -196,7 +191,7 @@ class FeatureEngineer:
                             df: pd.DataFrame,
                             window: int = 20,
                             num_std: float = 2.0,
-                            column: str = "close") -> pd.DataFrame:
+                            column: str = "Close") -> pd.DataFrame:
         """Add Bollinger Bands."""
         if self.validate:
             self._validate_data(df, [column])
@@ -204,24 +199,20 @@ class FeatureEngineer:
         df = df.copy()
         min_periods = self.min_periods or window
 
-        # Calculate middle band (SMA)
         sma = df[column].rolling(
             window=window,
             min_periods=min_periods
         ).mean()
 
-        # Calculate standard deviation
         std = df[column].rolling(
             window=window,
             min_periods=min_periods
         ).std()
 
-        # Calculate bands
         df["BB_Middle"] = sma
         df["BB_Upper"] = sma + (std * num_std)
         df["BB_Lower"] = sma - (std * num_std)
 
-        # Calculate bandwidth and %B
         df["BB_Bandwidth"] = (df["BB_Upper"] - df["BB_Lower"]) / df["BB_Middle"]
         df["%B"] = (df[column] - df["BB_Lower"]) / (df["BB_Upper"] - df["BB_Lower"])
 
@@ -233,24 +224,21 @@ class FeatureEngineer:
                               window: int = 20) -> pd.DataFrame:
         """Add volume-based indicators."""
         if self.validate:
-            self._validate_data(df, ["close", "volume"])
+            self._validate_data(df, ["Close", "Volume"])
 
         df = df.copy()
         min_periods = self.min_periods or window
 
-        # Volume SMA
-        df["Volume_SMA"] = df["volume"].rolling(
+        df["Volume_SMA"] = df["Volume"].rolling(
             window=window,
             min_periods=min_periods
         ).mean()
 
-        # On-Balance Volume (OBV)
-        df["OBV"] = (np.sign(df["close"].diff()) *
-                     df["volume"]).fillna(0).cumsum()
+        df["OBV"] = (np.sign(df["Close"].diff()) *
+                     df["Volume"]).fillna(0).cumsum()
 
-        # Volume-Price Trend (VPT)
-        df["VPT"] = (df["volume"] *
-                     df["close"].pct_change()).fillna(0).cumsum()
+        df["VPT"] = (df["Volume"] *
+                     df["Close"].pct_change()).fillna(0).cumsum()
 
         return self._handle_nans(df, ["Volume_SMA", "OBV", "VPT"])
 
@@ -262,16 +250,15 @@ class FeatureEngineer:
 
         Args:
             df: Input DataFrame
-            features: List of features to generate (None for all)
+            features: List of feature_engineering to generate (None for all)
         """
         logger.info("Generating technical indicators")
 
         if self.validate:
-            self._validate_data(df, ["close"])
+            self._validate_data(df, ["Close"])
 
         df = df.copy()
 
-        # Default feature set
         all_features = {
             'sma': lambda: self.add_moving_average(df, ma_type='simple'),
             'ema': lambda: self.add_moving_average(df, ma_type='exp'),
@@ -282,16 +269,15 @@ class FeatureEngineer:
             'volume': lambda: self.add_volume_indicators(df)
         }
 
-        # Generate selected features
         features = features or list(all_features.keys())
         invalid_features = set(features) - set(all_features.keys())
         if invalid_features:
-            raise ValueError(f"Unknown features: {invalid_features}")
+            raise ValueError(f"Unknown feature_engineering: {invalid_features}")
 
         for feature in features:
             try:
                 df = all_features[feature]()
-                logger.info(f"Generated {feature} features")
+                logger.info(f"Generated {feature} feature_engineering")
             except Exception as e:
                 logger.error(f"Error generating {feature}: {str(e)}")
                 raise
@@ -301,23 +287,24 @@ class FeatureEngineer:
 
 def main():
     """Example usage."""
-    # Sample data
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.max_rows', None)
+    pd.set_option('display.expand_frame_repr', False)
+    pd.set_option('max_colwidth', None)
+
     data = pd.DataFrame({
-        'close': np.random.randn(1000).cumsum(),
-        'volume': np.random.randint(1000, 10000, 1000)
+        'Close': np.random.randn(1000).cumsum(),
+        'Volume': np.random.randint(1000, 10000, 1000)
     })
 
-    # Initialize with different NaN handling strategies
     engineer = FeatureEngineer(
-        min_periods=10,  # Require at least 10 periods
-        fill_method='backfill',  # Drop rows with NaN values
-        validate=True  # Validate inputs
+        min_periods=10,
+        fill_method='backfill',
+        validate=True
     )
 
-    # Generate all features
     df_all = engineer.generate_features(data)
 
-    # Generate specific features
     df_selected = engineer.generate_features(
         data,
         features=['sma', 'rsi', 'bbands']
@@ -327,4 +314,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    df_all, df_selected = main()
+    print(df_all.head(100))
+    print(df_selected.head(100))

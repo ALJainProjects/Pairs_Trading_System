@@ -1,0 +1,86 @@
+Clustering Analysis Summary
+=========================
+
+
+Method: kmeans
+----------------------------------------
+num_clusters: 5
+avg_cluster_size: 20.200
+max_cluster_size: 34
+min_cluster_size: 6
+total_assets: 101
+avg_intra_similarity: 0.456
+similarity_std: 0.152
+
+Method: dbscan
+----------------------------------------
+num_clusters: 1
+avg_cluster_size: 92.000
+max_cluster_size: 92
+min_cluster_size: 92
+total_assets: 92
+avg_intra_similarity: 0.395
+similarity_std: 0.157
+
+Method: agglomerative
+----------------------------------------
+num_clusters: 5
+avg_cluster_size: 20.200
+max_cluster_size: 87
+min_cluster_size: 1
+total_assets: 101
+avg_intra_similarity: 0.396
+similarity_std: 0.166
+
+Method: graph_correlation
+----------------------------------------
+num_clusters: 7
+avg_cluster_size: 3.000
+max_cluster_size: 9
+min_cluster_size: 2
+total_assets: 21
+avg_intra_similarity: 0.829
+similarity_std: 0.055
+
+Method: graph_mutual_info
+----------------------------------------
+num_clusters: 7
+avg_cluster_size: 4.000
+max_cluster_size: 15
+min_cluster_size: 2
+total_assets: 28
+avg_intra_similarity: 0.761
+similarity_std: 0.148
+
+Method: graph_cosine
+----------------------------------------
+num_clusters: 7
+avg_cluster_size: 3.000
+max_cluster_size: 9
+min_cluster_size: 2
+total_assets: 21
+avg_intra_similarity: 0.829
+similarity_std: 0.055
+
+Method: graph_dtw
+----------------------------------------
+num_clusters: 1
+avg_cluster_size: 101.000
+max_cluster_size: 101
+min_cluster_size: 101
+total_assets: 101
+avg_intra_similarity: 0.468
+similarity_std: 0.177
+
+PCA Component Importance (K-Means):
+----------------------------------------
+PC1: 0.382
+PC2: 0.218
+PC3: 0.093
+PC4: 0.055
+PC5: 0.038
+PC6: 0.031
+PC7: 0.029
+PC8: 0.025
+PC9: 0.022
+PC10: 0.015

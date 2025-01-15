@@ -1,0 +1,108 @@
+Comprehensive Asset Analysis Report
+================================
+
+1. Denoising Analysis
+-------------------
+
+
+Wavelet Denoising Results:
+----------------------------------------
+reconstruction_error: 0.0000
+max_correlation_change: 0.3990
+avg_correlation_change: 0.0058
+orig_avg_correlation: 0.1941
+denoised_avg_correlation: 0.1954
+variance_reduction: 0.0116
+
+Pca Denoising Results:
+----------------------------------------
+reconstruction_error: 0.0003
+max_correlation_change: 0.8050
+avg_correlation_change: 0.3206
+orig_avg_correlation: 0.1941
+denoised_avg_correlation: 0.3539
+variance_reduction: 0.4240
+explained_variance_ratio:
+  Component 1: 0.4228
+  Component 2: 0.0654
+  Component 3: 0.0343
+  Component 4: 0.0217
+  Component 5: 0.0195
+total_variance_explained: 0.5637
+
+
+2. Pair Selection Analysis
+------------------------
+
+
+Parameter Set: conservative
+----------------------------------------
+Number of pairs found: 1356
+Average similarity: 0.9839
+Variance explained by components:
+  PC1: 42.28%
+  PC2: 6.54%
+
+Top 10 Most Similar Pairs:
+  AXON - WDAY: 1.0000
+  AXON - TTWO: 1.0000
+  TTWO - WDAY: 1.0000
+  TEAM - TTD: 1.0000
+  INTU - MCHP: 1.0000
+  AMD - MRVL: 1.0000
+  ADSK - ARM: 1.0000
+  ADBE - ASML: 1.0000
+  GFS - SNPS: 1.0000
+  CCEP - ROP: 1.0000
+
+Parameter Set: moderate
+----------------------------------------
+Number of pairs found: 805
+Average similarity: 0.9594
+Variance explained by components:
+  PC1: 42.28%
+  PC2: 6.54%
+  PC3: 3.43%
+
+Top 10 Most Similar Pairs:
+  AEP - XEL: 0.9999
+  ADBE - GOOGL: 0.9999
+  DDOG - MDB: 0.9999
+  GOOG - GOOGL: 0.9998
+  DDOG - ZS: 0.9998
+  ADI - AVGO: 0.9998
+  CSX - HON: 0.9997
+  AXON - PYPL: 0.9997
+  BIIB - MNST: 0.9997
+  ARM - QCOM: 0.9997
+
+Parameter Set: aggressive
+----------------------------------------
+Number of pairs found: 376
+Average similarity: 0.9255
+Variance explained by components:
+  PC1: 42.28%
+  PC2: 6.54%
+  PC3: 3.43%
+  PC4: 2.17%
+  PC5: 1.95%
+
+Top 10 Most Similar Pairs:
+  GOOG - GOOGL: 0.9999
+  AMAT - LRCX: 0.9990
+  KLAC - LRCX: 0.9979
+  AMAT - KLAC: 0.9962
+  MCHP - NXPI: 0.9950
+  BKR - FANG: 0.9943
+  ADI - MCHP: 0.9941
+  DDOG - MDB: 0.9930
+  ADBE - GOOG: 0.9929
+  ROST - SBUX: 0.9925
+
+
+3. Stability Analysis
+-------------------
+
+conservative vs moderate: 40.42% stability
+conservative vs aggressive: 18.63% stability
+moderate vs aggressive: 35.59% stability

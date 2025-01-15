@@ -121,13 +121,13 @@ instance/
 # 9) Machine Learning
 # ------------------------------------------------------------------------------
 # Add specific paths for your project
-# models/        # Uncomment if you want to ignore all models
+# models_data/        # Uncomment if you want to ignore all models_data
 # data/         # Uncomment if you want to ignore all data
 # Ignore specific file types if needed:
 # *.h5
 # *.pkl
-# *.pt          # PyTorch models
-# *.onnx        # ONNX models
+# *.pt          # PyTorch models_data
+# *.onnx        # ONNX models_data
 
 # ------------------------------------------------------------------------------
 # 10) OS specific

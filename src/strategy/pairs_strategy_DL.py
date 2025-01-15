@@ -1,7 +1,7 @@
 """
 Pairs Trading with Deep Learning (Corrected for Look-Ahead Bias)
 
-This module implements deep learning models for pairs trading with proper
+This module implements deep learning models_data for pairs trading with proper
 temporal handling to prevent look-ahead bias in:
 1. Sequence preparation
 2. Feature engineering
@@ -15,7 +15,6 @@ from typing import Dict, List, Tuple, Optional
 from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
 from sklearn.model_selection import TimeSeriesSplit
-import tensorflow as tf
 from config.logging_config import logger
 from src.models import DeepLearningModel
 
@@ -27,8 +26,8 @@ class PairsTradingDL:
                  sequence_length: int = 20,
                  prediction_horizon: int = 1,
                  zscore_threshold: float = 2.0,
-                 train_size: int = 252,  # One year
-                 validation_size: int = 63):  # Quarter
+                 train_size: int = 252,
+                 validation_size: int = 63):
         """
         Initialize the pairs trading model.
 
@@ -68,11 +67,8 @@ class PairsTradingDL:
         sequences = []
         targets = []
 
-        # Create sequences using only past data
         for i in range(start_idx, len(data) - self.prediction_horizon):
-            # Input sequence
             seq = data.iloc[i - self.sequence_length:i].values
-            # Target (future value)
             target = data.iloc[i + self.prediction_horizon - 1][target_column]
 
             sequences.append(seq)
@@ -93,12 +89,11 @@ class PairsTradingDL:
             start_idx: Starting index for calculations
 
         Returns:
-            DataFrame with features
+            DataFrame with feature_engineering
         """
         if start_idx is None:
             start_idx = self.sequence_length
 
-        # Calculate basic features
         spread = stock1_prices - stock2_prices
         ratio = stock1_prices / stock2_prices
 
@@ -109,7 +104,6 @@ class PairsTradingDL:
             'return2': stock2_prices.pct_change()
         })
 
-        # Calculate rolling features without look-ahead
         for col in ['spread', 'ratio']:
             roll_mean = data[col].rolling(
                 window=self.sequence_length,
@@ -124,10 +118,11 @@ class PairsTradingDL:
             data[f'{col}_std'] = roll_std
             data[f'{col}_zscore'] = (data[col] - roll_mean) / roll_std
 
-        # Remove NaN values
+        data['rolling_corr'] = stock1_prices.rolling(21).corr(stock2_prices)
+        data['spread_vol'] = spread.rolling(21).std()
+
         data = data.dropna()
 
-        # Ensure we only use data from start_idx onwards
         if start_idx is not None:
             data = data.iloc[start_idx:]
 
@@ -148,16 +143,13 @@ class PairsTradingDL:
         """
         result = data.copy()
 
-        # Generate trading signals based on z-score
         result['signal'] = 0
         result.loc[result['spread_zscore'] > self.zscore_threshold, 'signal'] = -1
         result.loc[result['spread_zscore'] < -self.zscore_threshold, 'signal'] = 1
 
-        # Binary classification target
         result['target'] = (result['signal'] != 0).astype(int)
 
         if forward_looking:
-            # Add forward returns for training
             result['forward_spread'] = result['spread'].shift(-self.prediction_horizon)
             result['forward_return'] = result['spread'].pct_change(self.prediction_horizon)
 
@@ -185,7 +177,6 @@ class PairsTradingDL:
             train_data = features.iloc[train_idx]
             val_data = features.iloc[val_idx]
 
-            # Prepare sequences for LSTM
             X_train, y_train = self.prepare_sequences(
                 train_data,
                 'spread',
@@ -198,7 +189,6 @@ class PairsTradingDL:
                 start_idx=self.sequence_length
             )
 
-            # Train models
             spread_model = self.train_spread_predictor(
                 X_train, y_train,
                 X_val, y_val
@@ -209,7 +199,6 @@ class PairsTradingDL:
                 val_data
             )
 
-            # Generate predictions
             predictions = self.predict_signals(
                 {'spread_predictor': spread_model,
                  'signal_classifier': signal_model},
@@ -222,7 +211,7 @@ class PairsTradingDL:
                 'val_period': (features.index[val_idx[0]],
                                features.index[val_idx[-1]]),
                 'predictions': predictions,
-                'models': {
+                'models_data': {
                     'spread_predictor': spread_model,
                     'signal_classifier': signal_model
                 }
@@ -231,31 +220,23 @@ class PairsTradingDL:
         return results
 
     def train_spread_predictor(self,
-                               X_train: np.ndarray,
-                               y_train: np.ndarray,
-                               X_val: np.ndarray,
-                               y_val: np.ndarray) -> Dict:
+                           X_train: np.ndarray,
+                           y_train: np.ndarray,
+                           X_val: np.ndarray,
+                           y_val: np.ndarray) -> Dict:
         """Train LSTM model for spread prediction."""
-        # Scale sequences
         X_train_scaled = np.array([self.scaler.fit_transform(x) for x in X_train])
         X_val_scaled = np.array([self.scaler.transform(x) for x in X_val])
 
-        # Build and train model
-        model = self.dl_model.build_lstm_model(
-            input_shape=(X_train.shape[1], X_train.shape[2]),
-            units=64,
-            dropout=0.2
-        )
-
-        history = self.dl_model.train_lstm_model(
-            model,
+        model = self.dl_model.train_lstm_model(
             X_train_scaled, y_train,
             X_val_scaled, y_val,
+            units=64,
+            dropout=0.2,
             epochs=100,
             batch_size=32
         )
 
-        # Evaluate
         metrics = self.dl_model.evaluate_lstm_model(
             model,
             X_val_scaled,
@@ -266,32 +247,25 @@ class PairsTradingDL:
             'model': model,
             'scaler': self.scaler,
             'metrics': metrics,
-            'history': history
+            'history': self.dl_model._history
         }
 
     def train_signal_classifier(self,
                                 train_data: pd.DataFrame,
                                 val_data: pd.DataFrame) -> Dict:
         """Train dense model for signal classification."""
-        # Prepare features
         feature_cols = ['spread_zscore', 'ratio_zscore', 'spread_ma',
-                        'return1', 'return2']
+                        'return1', 'return2', "rolling_corr", "spread_vol"]
 
         X_train = train_data[feature_cols].values
         y_train = train_data['target'].values
         X_val = val_data[feature_cols].values
         y_val = val_data['target'].values
 
-        # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_val_scaled = self.scaler.transform(X_val)
 
-        # Build and train model
-        model = self.dl_model.build_dense_model(
-            input_dim=len(feature_cols),
-            layers=[64, 32],
-            dropout=0.3
-        )
+        model = self.dl_model.build_dense_model(input_dim=len(feature_cols), layers=[64, 32], dropout=0.3)
 
         history = self.dl_model.train_dense_model(
             model,
@@ -301,7 +275,6 @@ class PairsTradingDL:
             batch_size=32
         )
 
-        # Evaluate
         metrics = self.dl_model.evaluate_dense_model(
             model,
             X_val_scaled,
@@ -322,28 +295,23 @@ class PairsTradingDL:
         """Generate trading predictions."""
         predictions = pd.DataFrame(index=new_data.index)
 
-        # Prepare sequences for spread prediction
         X_spread, _ = self.prepare_sequences(
             new_data,
             'spread',
             start_idx=self.sequence_length
         )
 
-        # Scale and predict spread
         X_spread_scaled = np.array([
             models['spread_predictor']['scaler'].transform(x)
             for x in X_spread
         ])
         spread_pred = models['spread_predictor']['model'].predict(X_spread_scaled)
 
-        # Prepare features for signal classification
         X_signal = new_data[models['signal_classifier']['feature_cols']].values
         X_signal_scaled = models['signal_classifier']['scaler'].transform(X_signal)
 
-        # Predict signals
         signal_prob = models['signal_classifier']['model'].predict(X_signal_scaled)
 
-        # Store predictions
         predictions['spread_prediction'] = np.nan
         predictions.iloc[self.sequence_length:]['spread_prediction'] = spread_pred
         predictions['signal_probability'] = signal_prob
@@ -357,7 +325,6 @@ class PairsTradingDL:
         """Plot walk-forward validation results."""
         fig = go.Figure()
 
-        # Plot actual spread
         fig.add_trace(go.Scatter(
             x=actual_spread.index,
             y=actual_spread,
@@ -365,12 +332,10 @@ class PairsTradingDL:
             name='Actual Spread'
         ))
 
-        # Plot predictions for each validation period
         for result in results:
             val_start, val_end = result['val_period']
             predictions = result['predictions']
 
-            # Plot predicted spread
             mask = ~predictions['spread_prediction'].isna()
             if mask.any():
                 fig.add_trace(go.Scatter(
@@ -381,13 +346,12 @@ class PairsTradingDL:
                     name=f'Predicted Spread ({val_start.date()})'
                 ))
 
-            # Plot signals
             for signal_val, color, name in zip(
                     [1, 0],
                     ['green', 'red'],
                     ['Long', 'Short']
             ):
-                signal_mask = predictions['predicted_signal'] == signal_val
+                signal_mask = np.array(predictions['predicted_signal'] == signal_val)
                 if signal_mask.any():
                     fig.add_trace(go.Scatter(
                         x=predictions.index[signal_mask],
@@ -397,7 +361,6 @@ class PairsTradingDL:
                         name=f'{name} Signal ({val_start.date()})'
                     ))
 
-            # Add period boundaries
             for x in [val_start, val_end]:
                 fig.add_vline(
                     x=x,
@@ -418,37 +381,85 @@ class PairsTradingDL:
 
 def main():
     """Example usage with proper temporal handling."""
-    # Load data
-    stock1_prices = pd.Series(...)  # Price series for stock 1
-    stock2_prices = pd.Series(...)  # Price series for stock 2
+    import yfinance as yf
+    from datetime import datetime, timedelta
 
-    # Initialize model
-    model = PairsTradingDL(
-        sequence_length=20,
-        prediction_horizon=1,
-        zscore_threshold=2.0,
-        train_size=252,
-        validation_size=63
-    )
+    try:
+        logger.info("Downloading historical data...")
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365 * 4)
 
-    # Prepare features
-    features = model.prepare_pair_data(
-        stock1_prices,
-        stock2_prices,
-        start_idx=20  # sequence_length
-    )
+        stock1_symbol = "AAPL"
+        stock2_symbol = "MSFT"
 
-    # Perform walk-forward validation
-    results = model.walk_forward_validation(features)
+        stock1_data = yf.download(stock1_symbol, start=start_date, end=end_date)
+        stock2_data = yf.download(stock2_symbol, start=start_date, end=end_date)
 
-    # Plot results
-    model.plot_walk_forward_results(
-        results,
-        stock1_prices - stock2_prices
-    )
+        stock1_prices = stock1_data['Close']
+        stock2_prices = stock2_data['Close']
 
-    return results
+        logger.info("Initializing model...")
+        model = PairsTradingDL(
+            sequence_length=20,
+            prediction_horizon=1,
+            zscore_threshold=2.0,
+            train_size=252,
+            validation_size=63
+        )
+
+        logger.info("Preparing feature_engineering...")
+        features = model.prepare_pair_data(
+            stock1_prices,
+            stock2_prices,
+            start_idx=20
+        )
+
+        features = model.generate_labels(features, forward_looking=True)
+
+        logger.info("Starting walk-forward validation...")
+        results = model.walk_forward_validation(features)
+
+        logger.info("Plotting results...")
+        model.plot_walk_forward_results(
+            results,
+            stock1_prices - stock2_prices
+        )
+
+        logger.info("\nValidation Results:")
+        for i, result in enumerate(results, 1):
+            val_start, val_end = result['val_period']
+            metrics = {
+                'spread_predictor': result['models_data']['spread_predictor']['metrics'],
+                'signal_classifier': result['models_data']['signal_classifier']['metrics']
+            }
+
+            print(f"\nPeriod {i}: {val_start.date()} to {val_end.date()}")
+            print("Spread Predictor Metrics:")
+            for metric, value in metrics['spread_predictor'].items():
+                print(f"  {metric}: {value:.4f}")
+
+            print("Signal Classifier Metrics:")
+            for metric, value in metrics['signal_classifier'].items():
+                print(f"  {metric}: {value:.4f}")
+
+        return {
+            'feature_engineering': features,
+            'results': results,
+            'model': model,
+            'stock1_data': stock1_data,
+            'stock2_data': stock2_data
+        }
+
+    except Exception as e:
+        logger.error(f"Error in main execution: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
 
 
 if __name__ == "__main__":
-    main()
+    results = main()
+    if results is not None:
+        print("\nExecution completed successfully!")
+    else:
+        print("\nExecution failed. Check logs for details.")

@@ -38,7 +38,7 @@ def check_outliers(df: pd.DataFrame, method: str = 'IQR', factor: float = 1.5) -
     """
     logger.info(f"Checking for outliers using method={method}, factor={factor}.")
 
-    numeric_df = df.select_dtypes(include=[np.number])  # Only numeric for outlier detection
+    numeric_df = df.select_dtypes(include=[np.number])
     if numeric_df.empty:
         logger.warning("No numeric columns => skipping outlier detection.")
         return pd.DataFrame(False, index=df.index, columns=df.columns)
@@ -58,7 +58,6 @@ def check_outliers(df: pd.DataFrame, method: str = 'IQR', factor: float = 1.5) -
         logger.error(f"Outlier detection method '{method}' not supported.")
         raise ValueError(f"Method '{method}' not supported.")
 
-    # Re-join with original columns
     merged_mask = pd.DataFrame(False, index=df.index, columns=df.columns)
     for col in numeric_df.columns:
         merged_mask[col] = outliers[col]
@@ -93,8 +92,6 @@ def validate_dataframe(df: pd.DataFrame,
 
     if 'dtype' in methods:
         dtypes = check_data_types(df)
-        # Example policy: all columns must be numeric
-        # If your data includes non-numeric columns (e.g. 'ticker'), adjust accordingly.
         non_numeric_cols = dtypes[~dtypes.apply(lambda x: np.issubdtype(x, np.number))]
         if not non_numeric_cols.empty:
             logger.warning(f"Non-numeric columns detected:\n{non_numeric_cols}")
@@ -103,7 +100,6 @@ def validate_dataframe(df: pd.DataFrame,
     if 'outlier' in methods:
         outliers_mask = check_outliers(df, method=outlier_method, factor=outlier_factor)
         if outliers_mask.any().any():
-            # If you'd like to remove outliers automatically, you could do so here.
             logger.warning(f"Dataframe contains outliers using {outlier_method} method.")
             valid = False
 

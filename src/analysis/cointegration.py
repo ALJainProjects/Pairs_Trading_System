@@ -7,24 +7,23 @@ This module provides functionality for:
 3. Visualizing cointegrated pairs
 4. Generating detailed analysis reports
 """
+from typing import Optional
 
 import pandas as pd
 import numpy as np
 from statsmodels.tsa.stattools import coint
 from config.logging_config import logger
 import os
-from glob import glob
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
 
-# Configuration
+
 LOOKBACK_PERIODS = {
-    '7D': 7,  # ~1 week
-    '1M': 21,  # ~1 month
-    '3M': 63,  # ~3 months
-    '6M': 126,  # ~6 months
-    '12M': 252  # ~12 months
+    '7D': 7,
+    '1M': 21,
+    '3M': 63,
+    '6M': 126,
+    '12M': 252
 }
 
 
@@ -67,7 +66,12 @@ def calculate_half_life(spread: pd.Series) -> float:
     return half_life
 
 
-def find_cointegrated_pairs(prices: pd.DataFrame, lookback_period: int, significance_level: float = 0.05) -> list:
+def find_cointegrated_pairs(prices: pd.DataFrame,
+                            lookback_period: int,
+                            significance_level: float = 0.05,
+                            max_pairs: Optional[int] = None,
+                            min_half_life: int = 5,
+                            max_half_life: int = 126) -> list:
     """
     Find all pairs of assets that are cointegrated.
 
@@ -75,13 +79,15 @@ def find_cointegrated_pairs(prices: pd.DataFrame, lookback_period: int, signific
         prices (pd.DataFrame): Price data for all assets
         lookback_period (int): Number of days to look back
         significance_level (float): Significance level for cointegration test
+        max_pairs (Optional[int]): Maximum number of pairs to return
+        min_half_life (int): Minimum half-life in days
+        max_half_life (int): Maximum half-life in days
 
     Returns:
         list: List of dictionaries containing pair information
     """
     logger.info(f"Searching for cointegrated pairs with {lookback_period} days lookback.")
 
-    # Use only the most recent lookback_period days
     recent_prices = prices.iloc[-lookback_period:]
 
     n = recent_prices.shape[1]
@@ -95,9 +101,12 @@ def find_cointegrated_pairs(prices: pd.DataFrame, lookback_period: int, signific
             s1 = recent_prices.iloc[:, i]
             s2 = recent_prices.iloc[:, j]
 
-            # Calculate spread and half-life
             spread = s1 - s2 * np.polyfit(s2, s1, 1)[0]
             half_life = calculate_half_life(spread)
+
+            if half_life < min_half_life or half_life > max_half_life:
+                completed_pairs += 1
+                continue
 
             score, p_value, critical_values = coint(s1, s2)
 
@@ -117,9 +126,11 @@ def find_cointegrated_pairs(prices: pd.DataFrame, lookback_period: int, signific
                 logger.info(f"Progress: {completed_pairs}/{total_pairs} pairs tested")
 
     cointegrated_pairs = sorted(cointegrated_pairs, key=lambda x: x['p_value'])
+    if max_pairs is not None and max_pairs < len(cointegrated_pairs):
+        cointegrated_pairs = cointegrated_pairs[:max_pairs]
+
     logger.info(f"Total cointegrated pairs found: {len(cointegrated_pairs)}")
     return cointegrated_pairs
-
 
 def plot_cointegrated_pair(prices: pd.DataFrame, stock1: str, stock2: str, lookback_period: int) -> go.Figure:
     """
@@ -134,26 +145,21 @@ def plot_cointegrated_pair(prices: pd.DataFrame, stock1: str, stock2: str, lookb
     Returns:
         go.Figure: Plotly figure object
     """
-    # Get the price series
     recent_prices = prices.iloc[-lookback_period:]
     s1 = recent_prices[stock1]
     s2 = recent_prices[stock2]
 
-    # Calculate metrics
     normalized_s1 = (s1 - s1.mean()) / s1.std()
     normalized_s2 = (s2 - s2.mean()) / s2.std()
     ratio = s1 / s2
 
-    # Calculate spread and half-life
     beta = np.polyfit(s2, s1, 1)[0]
     spread = s1 - beta * s2
     half_life = calculate_half_life(spread)
 
-    # Calculate rolling metrics
     rolling_window = min(60, lookback_period // 4)
     rolling_corr = s1.rolling(window=rolling_window).corr(s2)
 
-    # Create subplots
     fig = make_subplots(
         rows=5, cols=1,
         subplot_titles=(
@@ -166,7 +172,6 @@ def plot_cointegrated_pair(prices: pd.DataFrame, stock1: str, stock2: str, lookb
         row_heights=[0.2, 0.2, 0.2, 0.2, 0.2]
     )
 
-    # Add traces
     fig.add_trace(go.Scatter(x=s1.index, y=s1, name=stock1), row=1, col=1)
     fig.add_trace(go.Scatter(x=s2.index, y=s2, name=stock2), row=1, col=1)
 
@@ -177,7 +182,6 @@ def plot_cointegrated_pair(prices: pd.DataFrame, stock1: str, stock2: str, lookb
     fig.add_trace(go.Scatter(x=ratio.index, y=ratio, name='Price Ratio'), row=4, col=1)
     fig.add_trace(go.Scatter(x=rolling_corr.index, y=rolling_corr, name='Rolling Corr'), row=5, col=1)
 
-    # Update layout
     fig.update_layout(
         height=1500,
         width=1000,
@@ -202,7 +206,6 @@ def load_nasdaq100_data(
     """
     logger.info(f"Loading price data from {data_dir}")
 
-    # Get CSV files
     csv_files = [f for f in os.listdir(data_dir)
                  if f.endswith('.csv') and f != 'combined_prices.csv']
 
@@ -261,7 +264,6 @@ def create_summary_report(all_pairs_results: dict, output_dir: str):
     summary_df = pd.DataFrame(summary_data)
     summary_df.to_csv(os.path.join(output_dir, 'period_comparison_summary.csv'), index=False)
 
-    # Create detailed comparison
     with open(os.path.join(output_dir, 'period_comparison_details.txt'), 'w') as f:
         f.write("Comparison of Top Pairs Across Different Periods\n")
         f.write("============================================\n\n")
@@ -276,40 +278,31 @@ def create_summary_report(all_pairs_results: dict, output_dir: str):
 
 
 if __name__ == "__main__":
-    # Load price data
+
     logger.info("Loading price data...")
     prices_df = load_nasdaq100_data()
     logger.info(f"Loaded price data for {len(prices_df.columns)} stocks")
 
-    # Create timestamp for output directory
-    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_output_dir = f"cointegration_test"
     os.makedirs(base_output_dir, exist_ok=True)
 
-    # Store results for all periods
     all_pairs_results = {}
 
-    # Process each lookback period
     for period_name, lookback_days in LOOKBACK_PERIODS.items():
         logger.info(f"Processing {period_name} period ({lookback_days} days)")
 
-        # Create period-specific directory
         period_dir = os.path.join(base_output_dir, f"period_{period_name}")
         os.makedirs(period_dir, exist_ok=True)
 
-        # Find cointegrated pairs for this period
         cointegrated_pairs = find_cointegrated_pairs(prices_df, lookback_days)
         all_pairs_results[period_name] = cointegrated_pairs
 
-        # Save results to CSV
         results_df = pd.DataFrame(cointegrated_pairs)
         results_df.to_csv(os.path.join(period_dir, 'cointegrated_pairs.csv'), index=False)
 
-        # Create plots directory for this period
         plots_dir = os.path.join(period_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
 
-        # Plot top 10 pairs for this period
         logger.info(f"Plotting top 10 pairs for {period_name} period...")
         for i, pair in enumerate(cointegrated_pairs[:10]):
             stock1, stock2 = pair['stock1'], pair['stock2']
@@ -317,7 +310,6 @@ if __name__ == "__main__":
             plot_filename = f'pair_{i + 1}_{stock1}_{stock2}_analysis.html'
             fig.write_html(os.path.join(plots_dir, plot_filename))
 
-        # Generate period-specific summary
         print(f"\nPeriod: {period_name} ({lookback_days} days)")
         print("-" * 40)
         print(f"Total pairs found: {len(cointegrated_pairs)}")
@@ -329,6 +321,5 @@ if __name__ == "__main__":
                 print(f"{pair['stock1']} - {pair['stock2']}: ")
                 print(f"    p-value = {pair['p_value']:.4f}, half-life = {pair['half_life']:.1f} days")
 
-    # Create overall summary comparing different periods
     create_summary_report(all_pairs_results, base_output_dir)
     logger.info("Analysis complete. Results saved in: " + base_output_dir)

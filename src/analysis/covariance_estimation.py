@@ -14,6 +14,7 @@ Each method is implemented as a separate class inheriting from BaseCovariance.
 
 import pandas as pd
 import numpy as np
+import traceback
 from abc import ABC, abstractmethod
 from sklearn.covariance import GraphicalLasso, MinCovDet
 from sklearn.ensemble import IsolationForest
@@ -22,17 +23,48 @@ from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Dict, List
 from scipy import stats
 import warnings
 import logging
+from sklearn.decomposition import PCA
 
-# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def cap_extreme_values(returns, zscore_threshold=5):
+    """
+    Caps extreme values in returns based on a z-score threshold.
+
+    Args:
+        returns: DataFrame of asset returns.
+        zscore_threshold: Threshold for capping z-scores (default=10).
+
+    Returns:
+        Capped DataFrame.
+    """
+    capped_returns = returns.copy()
+
+    for column in returns.columns:
+        col_mean = returns[column].mean()
+        col_std = returns[column].std()
+        z_scores = (returns[column] - col_mean) / col_std
+
+        capped_returns.loc[z_scores > zscore_threshold, column] = col_mean + zscore_threshold * col_std
+
+        capped_returns.loc[z_scores < -zscore_threshold, column] = col_mean - zscore_threshold * col_std
+
+    return capped_returns
+
+
+def reduce_dimensionality(returns: pd.DataFrame, n_components: int) -> pd.DataFrame:
+    pca = PCA(n_components=n_components)
+    reduced_data = pca.fit_transform(returns)
+    return pd.DataFrame(reduced_data, index=returns.index)
+
 
 class BaseCovariance(ABC):
     """Base class for covariance estimation methods.
@@ -71,15 +103,17 @@ class BaseCovariance(ABC):
         if returns.isnull().any().any():
             raise ValueError("Returns contain missing values")
 
-        # Check for insufficient variation
         std_devs = returns.std()
         if (std_devs < 1e-8).any():
             raise ValueError("Some assets show near-zero variation")
 
-        # Check for extreme values
-        z_scores = stats.zscore(returns)
-        if np.abs(z_scores).max() > 10:
-            warnings.warn("Extreme values detected in returns (|z-score| > 10)")
+        z_scores = stats.zscore(returns, axis=0, nan_policy='omit')
+        max_z_scores = pd.Series(np.abs(z_scores).max(axis=0), index=returns.columns)
+
+        for column, max_z in max_z_scores.items():
+            if max_z > 7:
+                warnings.warn(f"Extreme values detected in column '{column}' (|z-score| > 10, max={max_z:.2f})")
+
 
     def analyze(self) -> dict:
         """Analyze properties of estimated covariance matrix."""
@@ -136,6 +170,7 @@ class StandardCovariance(BaseCovariance):
 
     def fit(self, returns: pd.DataFrame) -> 'StandardCovariance':
         """Estimate standard sample covariance."""
+        returns = cap_extreme_values(returns)
         self.validate_input(returns)
         self.column_names_ = returns.columns
 
@@ -167,9 +202,9 @@ class EWMACovariance(BaseCovariance):
         Raises:
             ValueError: If insufficient data points or invalid input
         """
+        returns = cap_extreme_values(returns)
         self.validate_input(returns)
 
-        # Ensure data is properly sorted by date
         if not isinstance(returns.index, pd.DatetimeIndex):
             raise ValueError("Returns index must be a DatetimeIndex")
 
@@ -185,40 +220,31 @@ class EWMACovariance(BaseCovariance):
         n_assets = len(self.column_names_)
 
         try:
-            # Compute pairwise covariances
             ewm_cov = returns_sorted.ewm(
                 span=self.span,
                 min_periods=self.min_periods,
-                adjust=True  # Use adjusted (normalized) weights
+                adjust=True
             ).cov()
 
-            # Handle multi-index correctly
-            # ewm_cov has a MultiIndex: (time, asset1, asset2)
             latest_date = ewm_cov.index.get_level_values(0).unique()[-1]
 
-            # Extract the final covariance matrix
             latest_cov = ewm_cov.loc[latest_date]
 
-            # Ensure we have a proper n_assets × n_assets matrix
             if isinstance(latest_cov, pd.Series):
-                # Convert series to matrix if necessary
                 self.covariance_ = latest_cov.unstack().values
             else:
                 self.covariance_ = latest_cov.values
 
-            # Additional shape validation
             if self.covariance_.shape != (n_assets, n_assets):
                 raise ValueError(
                     f"Invalid covariance matrix shape: {self.covariance_.shape}. "
                     f"Expected: ({n_assets}, {n_assets})"
                 )
 
-            # Store weights
             alpha = 2 / (self.span + 1)
             self.weights_ = np.array([(1-alpha)**i for i in range(len(returns))])
             self.weights_ = self.weights_[::-1] / self.weights_.sum()
 
-            # Calculate correlation
             std = np.sqrt(np.diag(self.covariance_))
             self.correlation_ = self.covariance_ / np.outer(std, std)
             self.eigenvalues_ = np.linalg.eigvals(self.covariance_)
@@ -250,8 +276,8 @@ class EWMACovariance(BaseCovariance):
 class GraphicalLassoCovariance(BaseCovariance):
     """Graphical Lasso (sparse) covariance estimation."""
 
-    def __init__(self, alpha: float = 0.01, max_iter: int = 100,
-                 tol: float = 1e-4):
+    def __init__(self, alpha: float = 0.01, max_iter: int = 500,
+                 tol: float = 1e-3):
         super().__init__()
         self.alpha = alpha
         self.max_iter = max_iter
@@ -260,14 +286,14 @@ class GraphicalLassoCovariance(BaseCovariance):
 
     def fit(self, returns: pd.DataFrame) -> 'GraphicalLassoCovariance':
         """Estimate sparse covariance using Graphical Lasso."""
+        returns = reduce_dimensionality(returns, n_components=50)
+        returns = cap_extreme_values(returns)
         self.validate_input(returns)
         self.column_names_ = returns.columns
 
-        # Standardize returns
         scaler = StandardScaler()
         scaled_returns = scaler.fit_transform(returns)
 
-        # Fit GraphicalLasso
         model = GraphicalLasso(
             alpha=self.alpha,
             max_iter=self.max_iter,
@@ -275,12 +301,10 @@ class GraphicalLassoCovariance(BaseCovariance):
         )
         model.fit(scaled_returns)
 
-        # Transform back to original scale
         scales = returns.std()
         self.covariance_ = model.covariance_ * np.outer(scales, scales)
         self.precision_ = model.precision_ / np.outer(scales, scales)
 
-        # Calculate correlation
         std = np.sqrt(np.diag(self.covariance_))
         self.correlation_ = self.covariance_ / np.outer(std, std)
         self.eigenvalues_ = np.linalg.eigvals(self.covariance_)
@@ -291,7 +315,6 @@ class GraphicalLassoCovariance(BaseCovariance):
         """Extended analysis including sparsity metrics."""
         base_analysis = super().analyze()
 
-        # Add sparsity analysis
         threshold = 1e-5
         precision_sparsity = np.mean(np.abs(self.precision_) < threshold)
         covariance_sparsity = np.mean(np.abs(self.covariance_) < threshold)
@@ -319,6 +342,7 @@ class OLSCovariance(BaseCovariance):
 
     def fit(self, returns: pd.DataFrame) -> 'OLSCovariance':
         """Estimate OLS-denoised covariance with optional factor structure."""
+        returns = cap_extreme_values(returns)
         self.validate_input(returns)
         self.column_names_ = returns.columns
 
@@ -369,9 +393,8 @@ class OLSCovariance(BaseCovariance):
             model = LinearRegression()
             model.fit(X, y)
 
-            # Get residuals (noise component)
             systematic = model.predict(X)
-            denoised[target] = y - systematic  # Use residuals instead of systematic
+            denoised[target] = y - systematic
 
         return denoised
 
@@ -411,7 +434,6 @@ class RobustCovariance(BaseCovariance):
         self.support_fraction = support_fraction
         self.random_state = random_state
 
-        # Additional attributes
         self.outlier_mask_ = None
         self.mahalanobis_dist_ = None
         self.contamination_used_ = None
@@ -421,10 +443,10 @@ class RobustCovariance(BaseCovariance):
 
     def fit(self, returns: pd.DataFrame) -> 'RobustCovariance':
         """Estimate robust covariance using MCD."""
+        returns = cap_extreme_values(returns)
         self.validate_input(returns)
         self.column_names_ = returns.columns
 
-        # Estimate contamination if not provided
         if self.contamination is None:
             iso = IsolationForest(contamination='auto',
                                 random_state=self.random_state)
@@ -437,27 +459,23 @@ class RobustCovariance(BaseCovariance):
             self.contamination_used_ = min(self.contamination,
                                          self.contamination_cap)
 
-        # Set support fraction for MCD
         if self.support_fraction is None:
             self.support_fraction = 1.0 - self.contamination_used_
 
         try:
-            # Fit MCD estimator
             mcd = MinCovDet(support_fraction=self.support_fraction,
                            random_state=self.random_state)
             mcd.fit(returns)
 
-            # Store results
             self.covariance_ = mcd.covariance_
             self.location_ = mcd.location_
             self.precision_ = mcd.precision_
             self.support_ = mcd.support_
 
-            # Calculate Mahalanobis distances and outlier mask
             self.mahalanobis_dist_ = mcd.mahalanobis(returns)
-            self.outlier_mask_ = self.mahalanobis_dist_ > mcd.threshold_
+            threshold = np.percentile(self.mahalanobis_dist_, (1 - self.contamination_used_) * 100)
+            self.outlier_mask_ = self.mahalanobis_dist_ > threshold
 
-            # Calculate correlation matrix
             std = np.sqrt(np.diag(self.covariance_))
             self.correlation_ = self.covariance_ / np.outer(std, std)
             self.eigenvalues_ = np.linalg.eigvals(self.covariance_)
@@ -471,7 +489,6 @@ class RobustCovariance(BaseCovariance):
         """Extended analysis including robustness metrics."""
         base_analysis = super().analyze()
 
-        # Add robustness-specific analysis
         robust_analysis = {
             'robustness_metrics': {
                 'contamination_used': float(self.contamination_used_),
@@ -497,7 +514,6 @@ class RobustCovariance(BaseCovariance):
         if self.outlier_mask_ is None:
             raise ValueError("No outliers detected. Call fit() first.")
 
-        # Select top assets by variance
         top_assets = returns.var().nlargest(n_assets).index
 
         fig = make_subplots(
@@ -508,7 +524,6 @@ class RobustCovariance(BaseCovariance):
         )
 
         for i, asset in enumerate(top_assets, 1):
-            # Normal returns
             fig.add_trace(
                 go.Scatter(
                     x=returns.index[~self.outlier_mask_],
@@ -520,7 +535,6 @@ class RobustCovariance(BaseCovariance):
                 row=i, col=1
             )
 
-            # Outliers
             fig.add_trace(
                 go.Scatter(
                     x=returns.index[self.outlier_mask_],
@@ -551,7 +565,6 @@ class KalmanCovariance(BaseCovariance):
                  parameter_set: Optional[str] = None):
         super().__init__()
 
-        # Default parameter sets
         PARAMETER_SETS = {
             'conservative': {
                 'process_variance': 1e-6,
@@ -587,67 +600,54 @@ class KalmanCovariance(BaseCovariance):
 
     def fit(self, returns: pd.DataFrame) -> 'KalmanCovariance':
         """Estimate time-varying covariance using Kalman Filter."""
+        returns = cap_extreme_values(returns)
         self.validate_input(returns)
         self.column_names_ = returns.columns
 
         n_assets = returns.shape[1]
         n_obs = returns.shape[0]
 
-        # Initialize diagnostics with only used metrics
         self.diagnostics_ = {
             'condition_numbers': []
         }
 
-        # Initialize state with sample covariance of first batch
         initial_batch = returns.iloc[:min(self.batch_size, n_obs)]
         current_cov = initial_batch.cov().values
 
-        # Process returns in batches
         for start_idx in range(0, n_obs, self.batch_size):
             end_idx = min(start_idx + self.batch_size, n_obs)
             batch_returns = returns.iloc[start_idx:end_idx]
 
-            # Update for each observation in batch
             for _, ret in batch_returns.iterrows():
-                # Predict step
                 current_cov = current_cov / self.forgetting_factor
                 current_cov += self.process_variance * np.eye(n_assets)
 
-                # Update step
                 y = ret.values.reshape(-1, 1)
                 S = current_cov + self.measurement_variance * np.eye(n_assets)
 
                 try:
-                    # Compute Kalman gain using stable solver
                     K = np.linalg.solve(S, current_cov).T
 
-                    # Update estimate
                     innovation = y @ y.T - current_cov
                     current_cov = current_cov + K @ innovation
 
-                    # Ensure symmetry
                     current_cov = (current_cov + current_cov.T) / 2
 
-                    # Force positive definiteness if needed
                     min_eig = np.min(np.real(np.linalg.eigvals(current_cov)))
                     if min_eig < 1e-10:
                         current_cov += (abs(min_eig) + 1e-10) * np.eye(n_assets)
 
-                    # Update diagnostics
                     cond_num = np.linalg.cond(current_cov)
                     self.diagnostics_['condition_numbers'].append(float(cond_num))
 
                 except np.linalg.LinAlgError:
-                    # Fallback to robust update
                     current_cov = 0.9 * current_cov + 0.1 * (y @ y.T)
 
-        # Store final estimates
         self.covariance_ = current_cov
         std = np.sqrt(np.diag(self.covariance_))
         self.correlation_ = self.covariance_ / np.outer(std, std)
         self.eigenvalues_ = np.linalg.eigvals(self.covariance_)
 
-        # Final diagnostics
         self.diagnostics_['final_condition_number'] = float(np.linalg.cond(current_cov))
         self.diagnostics_['eigenvalue_range'] = {
             'min': float(np.min(np.real(self.eigenvalues_))),
@@ -660,7 +660,6 @@ class KalmanCovariance(BaseCovariance):
         """Extended analysis including Kalman Filter diagnostics."""
         base_analysis = super().analyze()
 
-        # Add Kalman-specific analysis
         kalman_analysis = {
             'kalman_diagnostics': {
                 'final_condition_number': self.diagnostics_['final_condition_number'],
@@ -683,7 +682,6 @@ class KalmanCovariance(BaseCovariance):
 
         fig = make_subplots(rows=1, cols=1)
 
-        # Plot condition numbers
         fig.add_trace(
             go.Scatter(
                 y=np.log10(self.diagnostics_['condition_numbers']),
@@ -703,6 +701,78 @@ class KalmanCovariance(BaseCovariance):
 
         return fig
 
+    def plot_outliers(self, returns: pd.DataFrame, n_assets: int = 5, threshold_percentile: float = 95) -> go.Figure:
+        """
+        Plot return series with outliers highlighted using Mahalanobis distance.
+
+        Args:
+            returns: DataFrame of asset returns.
+            n_assets: Number of assets to plot.
+            threshold_percentile: Percentile for the Mahalanobis distance threshold.
+
+        Returns:
+            go.Figure: A Plotly figure showing return series and outliers.
+        """
+        if self.covariance_ is None:
+            raise ValueError("Covariance matrix not yet estimated. Call fit() first.")
+
+        residuals = returns - returns.mean()
+
+        n_assets = residuals.shape[1]
+        if self.covariance_.shape != (n_assets, n_assets):
+            raise ValueError(
+                f"Covariance matrix dimensions {self.covariance_.shape} do not match "
+                f"the number of assets {n_assets}."
+            )
+
+        inv_cov = np.linalg.inv(self.covariance_)
+        mahalanobis_distances = np.sqrt(
+            np.sum(residuals.values @ inv_cov * residuals.values, axis=1)
+        )
+
+        threshold = np.percentile(mahalanobis_distances, threshold_percentile)
+        outlier_mask = mahalanobis_distances > threshold
+
+        top_assets = returns.var().nlargest(n_assets).index
+
+        fig = make_subplots(
+            rows=n_assets,
+            cols=1,
+            subplot_titles=[f"Returns and Outliers - {asset}" for asset in top_assets]
+        )
+
+        for i, asset in enumerate(top_assets, start=1):
+            fig.add_trace(
+                go.Scatter(
+                    x=returns.index,
+                    y=returns[asset],
+                    mode='lines',
+                    name=f"{asset} Returns",
+                    line=dict(color='blue')
+                ),
+                row=i, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=returns.index[outlier_mask],
+                    y=returns[asset][outlier_mask],
+                    mode='markers',
+                    name=f"{asset} Outliers",
+                    marker=dict(color='red', size=8)
+                ),
+                row=i, col=1
+            )
+
+        fig.update_layout(
+            height=300 * n_assets,
+            title="Return Series with Outliers Highlighted (Kalman Filter)",
+            showlegend=True
+        )
+
+        return fig
+
+
 def plot_method_comparison(returns: pd.DataFrame,
                          methods: Dict[str, BaseCovariance],
                          title: str = "Covariance Estimation Comparison",
@@ -710,7 +780,6 @@ def plot_method_comparison(returns: pd.DataFrame,
     """Plot comparison of different covariance estimation methods."""
     figures = []
 
-    # Correlation matrix comparison
     n_methods = len(methods)
     fig = make_subplots(
         rows=1,
@@ -739,11 +808,10 @@ def plot_method_comparison(returns: pd.DataFrame,
 
     figures.append(fig)
 
-    # Add outlier plots for RobustCovariance
     if plot_outliers:
         robust_estimators = {
             name: est for name, est in methods.items()
-            if isinstance(est, RobustCovariance)
+            if isinstance(est, RobustCovariance) or isinstance(est, KalmanCovariance)
         }
 
         for name, estimator in robust_estimators.items():
@@ -853,57 +921,47 @@ def save_comparison_metrics(output_dir: str, results: Dict) -> None:
 
 def main():
     """Main execution function."""
-    # Create output directory
     output_dir = "covariance_analysis"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load data
     logger.info("Loading price data...")
     prices_df = load_nasdaq100_data(r'C:\Users\arnav\Downloads\pairs_trading_system\data\raw')
     returns = prices_df.pct_change().dropna()
 
-    # Initialize estimators
     estimators = {
         'Standard': StandardCovariance(),
         'EWMA': EWMACovariance(span=30),
-        'GraphicalLasso': GraphicalLassoCovariance(alpha=0.01),
+        'GraphicalLasso': GraphicalLassoCovariance(alpha=0.1),
         'OLS': OLSCovariance(),
         'Robust': RobustCovariance(),
         'Kalman': KalmanCovariance(parameter_set='moderate')
     }
 
-    # Process each estimator
     results = {}
     for name, estimator in estimators.items():
         logger.info(f"Processing {name} estimator...")
         try:
-            # Fit estimator
             estimator.fit(returns)
 
-            # Save correlation plot
             estimator.plot(f"{name} Correlation Matrix").write_html(
                 os.path.join(output_dir, f"{name.lower()}_correlation.html")
             )
 
-            # Save special plots if available
             if isinstance(estimator, KalmanCovariance):
                 estimator.plot_diagnostics().write_html(
                     os.path.join(output_dir, f"{name.lower()}_diagnostics.html")
                 )
 
-            # Get analysis
             results[name] = estimator.analyze()
 
         except Exception as e:
-            logger.error(f"Error processing {name}: {str(e)}")
+            logger.error(f"Error processing {name}: {traceback.format_exc()}")
             continue
 
-    # Create and save comparison plots
     figures = plot_method_comparison(returns, estimators)
     for i, fig in enumerate(figures):
         fig.write_html(os.path.join(output_dir, f"comparison_{i}.html"))
 
-    # Save analysis results
     write_analysis_results(output_dir, results)
     save_comparison_metrics(output_dir, results)
 

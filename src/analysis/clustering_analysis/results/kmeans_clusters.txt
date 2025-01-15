@@ -1,0 +1,18 @@
+Clustering Method: kmeans
+==================================================
+
+Cluster 1 (26 assets):
+ABNB, ADSK, AMZN, APP, CHTR, CMCSA, CRWD, CSX, CTSH, DASH, DDOG, EA, GOOG, GOOGL, INTC, MDB, MRVL, MU, PAYX, PYPL, QCOM, TEAM, TSLA, TTWO, WBD, ZS
+
+Cluster 2 (19 assets):
+ADP, AMGN, AXON, CDNS, CDW, CEG, CSGP, CTAS, FANG, GILD, LIN, ORLY, PCAR, PDD, REGN, ROST, SNPS, TMUS, VRTX
+
+Cluster 3 (6 assets):
+AEP, ARM, EXC, KDP, KHC, XEL
+
+Cluster 4 (34 assets):
+AAPL, ADBE, AMAT, AMD, ANSS, ASML, AVGO, BKNG, BKR, COST, CPRT, CSCO, FAST, IDXX, INTU, ISRG, KLAC, LRCX, LULU, MAR, MELI, META, MSFT, MSTR, NFLX, NVDA, NXPI, ODFL, PANW, PLTR, ROP, TTD, VRSK, WDAY
+
+Cluster 5 (16 assets):
+ADI, AZN, BIIB, CCEP, DXCM, FTNT, GEHC, GFS, HON, MCHP, MDLZ, MNST, ON, PEP, SBUX, TXN
+

@@ -21,23 +21,19 @@ import pandas as pd
 import numpy as np
 import pywt
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import (StandardScaler, RobustScaler,
-                                 MinMaxScaler, MaxAbsScaler)
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from typing import Dict, Tuple, Optional, List, Set
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import warnings
+from typing import Tuple, Optional, List
 import os
 from config.logging_config import logger
 
-# Configuration
 LOOKBACK_PERIODS = {
-    '1M': 21,    # ~1 month
-    '3M': 63,    # ~3 months
-    '6M': 126,   # ~6 months
-    '12M': 252   # ~12 months
+    '1M': 21,
+    '3M': 63,
+    '6M': 126,
+    '12M': 252
 }
 
 PARAMETER_SETS = {
@@ -60,12 +56,10 @@ class AssetAnalyzer:
         self.n_jobs = n_jobs
         self.random_state = random_state
 
-        # Denoising attributes
         self.original_returns = None
         self.denoised_returns = {}
         self.denoising_results = {}
 
-        # Pair selection attributes
         self.selected_pairs = {}
         self.pair_similarities = {}
         self.pca_loadings = {}
@@ -142,7 +136,6 @@ class AssetAnalyzer:
         if self.original_returns is None:
             raise ValueError("Must call fit() before selecting pairs")
 
-        # Use parameter set if provided
         if parameter_set is not None:
             if parameter_set not in PARAMETER_SETS:
                 raise ValueError(f"Unknown parameter set: {parameter_set}")
@@ -152,23 +145,18 @@ class AssetAnalyzer:
 
         logger.info(f"Selecting pairs using PCA with {n_components} components")
 
-        # Standardize returns
         scaler = StandardScaler()
         scaled = scaler.fit_transform(self.original_returns)
 
-        # Fit PCA
         pca = PCA(n_components=n_components)
         pca.fit(scaled)
         loadings = pca.components_.T
 
-        # Normalize loadings
         norms = np.linalg.norm(loadings, axis=1, keepdims=True)
         norm_loadings = loadings / norms
 
-        # Calculate similarities
         cos_sim = cosine_similarity(norm_loadings)
 
-        # Find pairs
         columns = self.original_returns.columns
         pairs = []
         similarities = []
@@ -179,7 +167,6 @@ class AssetAnalyzer:
                     pairs.append((columns[i], columns[j]))
                     similarities.append(cos_sim[i, j])
 
-        # Store results
         self.selected_pairs[parameter_set or 'custom'] = pairs
         self.pair_similarities[parameter_set or 'custom'] = similarities
         self.pca_loadings[parameter_set or 'custom'] = loadings
@@ -266,7 +253,6 @@ class AssetAnalyzer:
         }
 
         for i, asset in enumerate(top_assets, 1):
-            # Plot original returns
             fig.add_trace(
                 go.Scatter(
                     x=self.original_returns.index,
@@ -277,7 +263,6 @@ class AssetAnalyzer:
                 row=i, col=1
             )
 
-            # Plot denoised returns
             for method in methods:
                 if method in self.denoised_returns:
                     fig.add_trace(
@@ -309,7 +294,6 @@ class AssetAnalyzer:
 
         fig = go.Figure()
 
-        # Plot first two components
         fig.add_trace(go.Scatter(
             x=loadings[:, 0],
             y=loadings[:, 1],
@@ -337,12 +321,10 @@ class AssetAnalyzer:
         pairs = self.selected_pairs[parameter_set]
         similarities = self.pair_similarities[parameter_set]
 
-        # Create matrix of unique assets
         assets = list(set([asset for pair in pairs for asset in pair]))
         n_assets = len(assets)
         sim_matrix = np.zeros((n_assets, n_assets))
 
-        # Fill similarity matrix
         asset_to_idx = {asset: i for i, asset in enumerate(assets)}
         for pair, sim in zip(pairs, similarities):
             i, j = asset_to_idx[pair[0]], asset_to_idx[pair[1]]
@@ -421,21 +403,17 @@ def load_nasdaq100_data(data_dir: str) -> pd.DataFrame:
 
 def main():
     """Main execution function."""
-    # Create output directory
     output_dir = "asset_analysis"
     os.makedirs(output_dir, exist_ok=True)
 
     try:
-        # Load data
         logger.info("Loading price data...")
         prices_df = load_nasdaq100_data(r'C:\Users\arnav\Downloads\pairs_trading_system\data\raw')
         returns = prices_df.pct_change().dropna()
 
-        # Initialize analyzer
         analyzer = AssetAnalyzer(n_jobs=-1, random_state=42)
         analyzer.fit(returns)
 
-        # Create output directories
         denoising_dir = os.path.join(output_dir, "denoising")
         pairs_dir = os.path.join(output_dir, "pairs")
         plots_dir = os.path.join(output_dir, "plots")
@@ -443,33 +421,26 @@ def main():
         for directory in [denoising_dir, pairs_dir, plots_dir]:
             os.makedirs(directory, exist_ok=True)
 
-        # 1. Denoising Analysis
         logger.info("Starting denoising analysis...")
 
-        # Apply different denoising methods
         analyzer.denoise_wavelet(wavelet='db1', level=1, threshold=0.04)
         analyzer.denoise_pca(n_components=5)
 
-        # Generate denoising plots
         comparison_fig = analyzer.plot_denoising_comparison()
         comparison_fig.write_html(
             os.path.join(plots_dir, "denoising_comparison.html")
         )
 
-        # Save denoised returns
         for method, returns_df in analyzer.denoised_returns.items():
             returns_df.to_csv(
                 os.path.join(denoising_dir, f"{method}_denoised_returns.csv")
             )
 
-        # 2. Pair Selection Analysis
         logger.info("Starting pair selection analysis...")
 
-        # Apply pair selection with different parameter sets
         for param_set in PARAMETER_SETS.keys():
             pairs = analyzer.select_pairs(parameter_set=param_set)
 
-            # Save pairs
             pairs_df = pd.DataFrame(pairs, columns=['Asset1', 'Asset2'])
             pairs_df['Similarity'] = analyzer.pair_similarities[param_set]
             pairs_df.to_csv(
@@ -477,7 +448,6 @@ def main():
                 index=False
             )
 
-            # Generate and save plots
             loadings_fig = analyzer.plot_pca_loadings(param_set)
             loadings_fig.write_html(
                 os.path.join(plots_dir, f"{param_set}_loadings.html")
@@ -488,7 +458,6 @@ def main():
                 os.path.join(plots_dir, f"{param_set}_similarities.html")
             )
 
-        # 3. Stability Analysis
         logger.info("Analyzing pair stability...")
 
         stability_results = []
@@ -510,12 +479,10 @@ def main():
             index=False
         )
 
-        # 4. Create Comprehensive Report
         with open(os.path.join(output_dir, "analysis_report.txt"), "w") as f:
             f.write("Comprehensive Asset Analysis Report\n")
             f.write("================================\n\n")
 
-            # Denoising Results
             f.write("1. Denoising Analysis\n")
             f.write("-------------------\n\n")
 
@@ -532,7 +499,6 @@ def main():
                     else:
                         f.write(f"{key}: {value}\n")
 
-            # Pair Selection Results
             f.write("\n\n2. Pair Selection Analysis\n")
             f.write("------------------------\n\n")
 
@@ -556,7 +522,6 @@ def main():
                 for pair, sim in sorted_pairs[:10]:
                     f.write(f"  {pair[0]} - {pair[1]}: {sim:.4f}\n")
 
-            # Stability Analysis
             f.write("\n\n3. Stability Analysis\n")
             f.write("-------------------\n\n")
 

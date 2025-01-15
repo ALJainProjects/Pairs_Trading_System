@@ -1,7 +1,7 @@
 """
 Pairs Trading ML Implementation (Corrected for Look-Ahead Bias)
 
-This module implements machine learning models for pairs trading with proper
+This module implements machine learning models_data for pairs trading with proper
 temporal handling to prevent look-ahead bias in:
 1. Feature engineering
 2. Model training
@@ -10,23 +10,22 @@ temporal handling to prevent look-ahead bias in:
 """
 
 import pandas as pd
-import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
-from config.logging_config import logger
 from src.models import MachineLearningModel
+import numpy as np
 
 
 class PairsTraderML:
     """Machine learning based pairs trading implementation."""
 
     def __init__(self,
-                 lookback_windows: List[int] = [5, 10, 20, 50],
+                 lookback_windows: List[int] = (5, 10, 20, 50),
                  zscore_threshold: float = 2.0,
-                 train_size: int = 252,  # One year of daily data
-                 validation_size: int = 63):  # Quarter of daily data
+                 train_size: int = 252,
+                 validation_size: int = 63):
         """
         Initialize the pairs trader.
 
@@ -46,15 +45,16 @@ class PairsTraderML:
                          stock1_prices: pd.Series,
                          stock2_prices: pd.Series,
                          start_idx: int = 0,
-                         window: int = 20) -> pd.DataFrame:
+                         min_window: int = 20) -> pd.DataFrame:
         """
         Create features using expanding windows to prevent look-ahead bias.
+        Leverages MachineLearningModel's feature calculation methods.
 
         Args:
             stock1_prices: Price series for first stock
             stock2_prices: Price series for second stock
             start_idx: Starting index for feature calculation
-            window: Minimum window size for calculations
+            min_window: Minimum window size for calculations
 
         Returns:
             DataFrame with engineered features
@@ -62,49 +62,39 @@ class PairsTraderML:
         if len(stock1_prices) != len(stock2_prices):
             raise ValueError("Price series must be same length")
 
+        if start_idx < min_window:
+            raise ValueError(f"start_idx must be >= min_window ({min_window})")
+
         features = pd.DataFrame(index=stock1_prices.index[start_idx:])
 
-        # Calculate returns without look-ahead
         returns1 = stock1_prices.pct_change()
         returns2 = stock2_prices.pct_change()
         features['return1'] = returns1[start_idx:]
         features['return2'] = returns2[start_idx:]
 
-        # Calculate expanding window features
         for w in self.lookback_windows:
-            # Need enough data for the largest window
             if start_idx < w:
                 continue
 
-            # Calculate spread features
-            spread = stock1_prices - stock2_prices
-            roll_mean = spread.rolling(window=w, min_periods=w).mean()
-            roll_std = spread.rolling(window=w, min_periods=w).std()
-
-            features[f'spread_{w}'] = spread[start_idx:]
-            features[f'spread_ma_{w}'] = roll_mean[start_idx:]
-            features[f'spread_std_{w}'] = roll_std[start_idx:]
-
-            # Calculate z-scores using only past data
-            features[f'spread_zscore_{w}'] = (
-                    (spread[start_idx:] - roll_mean[start_idx:]) /
-                    roll_std[start_idx:]
+            spread_features = self.ml_model.calculate_spread_features(
+                stock1_prices[start_idx - w:],
+                stock2_prices[start_idx - w:],
+                window=w
             )
 
-            # Calculate ratio features
-            ratio = stock1_prices / stock2_prices
-            ratio_mean = ratio.rolling(window=w, min_periods=w).mean()
-            ratio_std = ratio.rolling(window=w, min_periods=w).std()
-
-            features[f'ratio_{w}'] = ratio[start_idx:]
-            features[f'ratio_ma_{w}'] = ratio_mean[start_idx:]
-            features[f'ratio_std_{w}'] = ratio_std[start_idx:]
-            features[f'ratio_zscore_{w}'] = (
-                    (ratio[start_idx:] - ratio_mean[start_idx:]) /
-                    ratio_std[start_idx:]
+            ratio_features = self.ml_model.calculate_pair_ratios(
+                stock1_prices[start_idx - w:],
+                stock2_prices[start_idx - w:],
+                window=w
             )
 
-        # Remove any remaining NaN values
+            window_features = pd.concat([spread_features, ratio_features], axis=1)
+
+            window_features = window_features.loc[:, ~window_features.columns.duplicated()]
+
+            for col in window_features.columns:
+                features[f'{col}_{w}' if not col.endswith(f'_{w}') else col] = window_features[col]
+
         features = features.dropna()
         return features
 
@@ -112,33 +102,20 @@ class PairsTraderML:
                         features: pd.DataFrame,
                         window: int,
                         forward_returns: bool = True) -> pd.DataFrame:
-        """
-        Generate trading signals and labels for training.
-
-        Args:
-            features: Feature DataFrame
-            window: Window for z-score calculation
-            forward_returns: Whether to include forward returns
-
-        Returns:
-            DataFrame with added labels
-        """
+        """Generate trading signals and labels for training."""
         data = features.copy()
         zscore_col = f'spread_zscore_{window}'
 
         if zscore_col not in data.columns:
             raise ValueError(f"Z-score column {zscore_col} not found")
 
-        # Current position signals
-        data['signal'] = 0  # Neutral
-        data.loc[data[zscore_col] > self.zscore_threshold, 'signal'] = -1  # Short
-        data.loc[data[zscore_col] < -self.zscore_threshold, 'signal'] = 1  # Long
+        data['signal'] = 0
+        data.loc[data[zscore_col] > self.zscore_threshold, 'signal'] = -1
+        data.loc[data[zscore_col] < -self.zscore_threshold, 'signal'] = 1
 
-        # Binary classification target
         data['target'] = (data['signal'] != 0).astype(int)
 
         if forward_returns:
-            # Add forward returns for training (not look-ahead in training)
             spread_col = f'spread_{window}'
             data['forward_return'] = data[spread_col].pct_change().shift(-1)
 
@@ -161,22 +138,19 @@ class PairsTraderML:
         tscv = TimeSeriesSplit(
             n_splits=5,
             test_size=self.validation_size,
-            gap=window  # Gap between train and test to prevent leakage
+            gap=window
         )
 
         for train_idx, val_idx in tscv.split(features):
-            # Get train/validation sets
             train_data = features.iloc[train_idx]
             val_data = features.iloc[val_idx]
 
-            # Generate labels (only for training data)
             train_data = self.generate_labels(
                 train_data,
                 window,
                 forward_returns=True
             )
 
-            # Select features
             feature_cols = [col for col in train_data.columns
                             if any(x in col for x in ['spread_', 'ratio_', 'return'])]
 
@@ -184,12 +158,10 @@ class PairsTraderML:
             y_class_train = train_data['target']
             y_reg_train = train_data['forward_return']
 
-            # Train models
             models = self.train_period_models(
                 X_train, y_class_train, y_reg_train
             )
 
-            # Generate predictions for validation set
             predictions = self.predict_signals(
                 models,
                 val_data[feature_cols]
@@ -200,7 +172,7 @@ class PairsTraderML:
                                  features.index[train_idx[-1]]),
                 'val_period': (features.index[val_idx[0]],
                                features.index[val_idx[-1]]),
-                'models': models,
+                'models_data': models,
                 'predictions': predictions,
                 'feature_importance': {
                     'classification': models['classification']['feature_importance'],
@@ -215,21 +187,20 @@ class PairsTraderML:
                             y_class: pd.Series,
                             y_reg: pd.Series) -> Dict:
         """
-        Train models for a specific period.
+        Train models_data for a specific period.
 
         Args:
-            X_train: Training features
+            X_train: Training feature_engineering
             y_class: Classification targets
             y_reg: Regression targets
 
         Returns:
-            Dictionary of trained models and metrics
+            Dictionary of trained models_data and metrics
         """
-        # Scale features
+
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
 
-        # Train classification model
         clf_model, clf_score = self.ml_model.train_classification_model(
             X_train_scaled,
             y_class,
@@ -237,7 +208,6 @@ class PairsTraderML:
             cv=5
         )
 
-        # Train regression model
         reg_model, reg_score = self.ml_model.train_regression_model(
             X_train_scaled,
             y_reg,
@@ -245,7 +215,6 @@ class PairsTraderML:
             cv=5
         )
 
-        # Get feature importance
         clf_importance = self.ml_model.feature_importance(
             clf_model,
             X_train.columns
@@ -276,7 +245,7 @@ class PairsTraderML:
         Generate predictions for new data.
 
         Args:
-            models: Dictionary of trained models
+            models: Dictionary of trained models_data
             features: New feature data
 
         Returns:
@@ -284,10 +253,8 @@ class PairsTraderML:
         """
         predictions = pd.DataFrame(index=features.index)
 
-        # Scale features using stored scaler
         X_scaled = models['classification']['scaler'].transform(features)
 
-        # Generate predictions
         predictions['signal_probability'] = (
             models['classification']['model'].predict_proba(X_scaled)[:, 1]
         )
@@ -306,7 +273,6 @@ class PairsTraderML:
         """Plot walk-forward validation results."""
         fig = go.Figure()
 
-        # Plot actual spread
         fig.add_trace(go.Scatter(
             x=actual_spread.index,
             y=actual_spread,
@@ -314,15 +280,13 @@ class PairsTraderML:
             name='Actual Spread'
         ))
 
-        # Plot signals for each validation period
         colors = ['green', 'red']
         for period_result in results:
             val_predictions = period_result['predictions']
             val_start, val_end = period_result['val_period']
 
-            # Plot signals
             for signal_val, color in zip([1, 0], colors):
-                mask = val_predictions['predicted_signal'] == signal_val
+                mask = np.array(val_predictions['predicted_signal'] == signal_val)
                 if mask.any():
                     fig.add_trace(go.Scatter(
                         x=val_predictions.index[mask],
@@ -332,7 +296,6 @@ class PairsTraderML:
                         name=f'{"Long" if signal_val else "Short"} Signal'
                     ))
 
-            # Add validation period boundaries
             for x in [val_start, val_end]:
                 fig.add_vline(
                     x=x,
@@ -352,37 +315,125 @@ class PairsTraderML:
 
 
 def main():
-    """Example usage with proper temporal handling."""
-    # Load data
-    stock1_prices = pd.Series(...)  # Price series for stock 1
-    stock2_prices = pd.Series(...)  # Price series for stock 2
+    """
+    Example usage of ML-based pairs trading with proper temporal handling.
+    Downloads real market data and performs comprehensive analysis.
+    """
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    import logging
+    import numpy as np
 
-    # Initialize trader
-    trader = PairsTraderML(
-        lookback_windows=[5, 10, 20, 50],
-        zscore_threshold=2.0,
-        train_size=252,
-        validation_size=63
-    )
+    try:
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
 
-    # Prepare features (minimum window for initial calculation)
-    features = trader.prepare_features(
-        stock1_prices,
-        stock2_prices,
-        start_idx=50  # Largest lookback window
-    )
+        logger.info("Downloading historical data...")
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365 * 3)
 
-    # Perform walk-forward optimization
-    results = trader.walk_forward_optimization(features)
+        stock1_symbol = "GOOGL"
+        stock2_symbol = "META"
 
-    # Plot results
-    trader.plot_walk_forward_results(
-        results,
-        stock1_prices - stock2_prices
-    )
+        stock1_data = yf.download(stock1_symbol, start=start_date, end=end_date)
+        stock2_data = yf.download(stock2_symbol, start=start_date, end=end_date)
 
-    return results
+        stock1_prices = stock1_data['Close']
+        stock2_prices = stock2_data['Close']
+
+        logger.info(f"Downloaded {len(stock1_prices)} days of data")
+
+        trader = PairsTraderML(
+            lookback_windows=[5, 10, 20, 50],
+            zscore_threshold=2.0,
+            train_size=252,
+            validation_size=63
+        )
+
+        logger.info("Preparing feature_engineering...")
+        features = trader.prepare_features(
+            stock1_prices,
+            stock2_prices,
+            start_idx=50
+        )
+
+        logger.info("Starting walk-forward optimization...")
+        results = trader.walk_forward_optimization(features)
+
+        logger.info("\nAnalyzing results...")
+
+        all_predictions = pd.DataFrame()
+        all_importances = {
+            'classification': pd.DataFrame(),
+            'regression': pd.DataFrame()
+        }
+
+        for period_idx, period_result in enumerate(results, 1):
+            val_start, val_end = period_result['val_period']
+            predictions = period_result['predictions']
+            all_predictions = pd.concat([all_predictions, predictions])
+
+            for model_type in ['classification', 'regression']:
+                importance_df = pd.DataFrame({
+                    'feature': period_result['feature_importance'][model_type].index,
+                    'importance': period_result['feature_importance'][model_type].values,
+                    'period': period_idx
+                })
+                all_importances[model_type] = pd.concat([
+                    all_importances[model_type],
+                    importance_df
+                ])
+
+            print(f"\nPeriod {period_idx}: {val_start.date()} to {val_end.date()}")
+
+            actual_spread = stock1_prices - stock2_prices
+            period_returns = predictions['predicted_return']
+            period_accuracy = np.mean(predictions['predicted_signal'])
+
+            print(f"Average Signal Probability: {predictions['signal_probability'].mean():.4f}")
+            print(f"Signal Rate: {period_accuracy:.4f}")
+            print(f"Average Predicted Return: {period_returns.mean():.4f}")
+
+        for model_type in ['classification', 'regression']:
+            avg_importance = all_importances[model_type].groupby('feature')['importance'].mean()
+            avg_importance = avg_importance.sort_values(ascending=False)
+
+            print(f"\nTop 5 Important Features ({model_type}):")
+            print(avg_importance.head().to_string())
+
+        logger.info("\nPlotting results...")
+        trader.plot_walk_forward_results(
+            results,
+            stock1_prices - stock2_prices
+        )
+
+        output_data = {
+            'feature_engineering': features,
+            'results': results,
+            'all_predictions': all_predictions,
+            'feature_importance': all_importances,
+            'pair_info': {
+                'stock1': stock1_symbol,
+                'stock2': stock2_symbol,
+                'start_date': start_date,
+                'end_date': end_date
+            }
+        }
+
+        return output_data
+
+    except Exception as e:
+        import traceback
+        logging.basicConfig(level=logging.INFO)
+        logger = logging.getLogger(__name__)
+        logger.error(traceback.format_exc())
+        logger.error(f"Error in main execution: {str(e)}")
+        return None
 
 
 if __name__ == "__main__":
-    main()
+    output = main()
+    if output is not None:
+        print("\nExecution completed successfully!")
+    else:
+        print("\nExecution failed. Check logs for details.")
