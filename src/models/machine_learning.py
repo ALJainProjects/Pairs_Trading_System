@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
-from typing import Tuple, Dict, List, Union
+from typing import Tuple, Dict, List, Union, Any
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression, LinearRegression
@@ -65,6 +65,8 @@ class MachineLearningModel:
             'RandomForestRegressor': RandomForestRegressor(n_estimators=100, random_state=42),
             'GradientBoostingRegressor': GradientBoostingRegressor(n_estimators=100, random_state=42),
         }
+
+        self.default_model = RandomForestRegressor(n_estimators=100, random_state=42)
 
     def calculate_dynamic_hedge_ratio(self, price1: pd.Series, price2: pd.Series) -> pd.Series:
         """Calculate dynamic hedge ratio using Kalman Filter."""
@@ -292,7 +294,7 @@ class MachineLearningModel:
         model_name: str = "RandomForestClassifier",
         test_size: float = 0.2,
         cv: int = 5
-    ) -> Tuple[object, Dict]:
+    ) -> Tuple[Any, Dict]:
         """Train and evaluate model."""
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, shuffle=False
@@ -403,7 +405,7 @@ def time_series_cross_validation(
             y=y_train,
             model_name=model_name,
             test_size=test_size,
-            cv=3
+            cv=5
         )
 
         y_pred = trained_model.predict(model.scaler.transform(X_test))

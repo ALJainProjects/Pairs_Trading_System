@@ -6,7 +6,7 @@ Checks data integrity (missing values, data types, outliers).
 
 import pandas as pd
 import numpy as np
-from typing import Tuple, List
+from typing import List
 from config.logging_config import logger
 
 

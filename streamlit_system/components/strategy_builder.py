@@ -4,14 +4,14 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from typing import Dict, List, Tuple
 
-from src.strategy.backtest import MultiPairBacktester
+from src.strategy.backtest import MultiPairBackTester
 from src.strategy.risk import PairRiskManager
-from src.strategy.pairs_strategy_SL import StatisticalPairsTrader
-from src.strategy.pairs_strategy_ML import PairsTraderML
+from src.strategy.pairs_strategy_SL import EnhancedStatPairsStrategy
+from src.strategy.pairs_strategy_ML import MLPairsStrategy
 from src.strategy.pairs_strategy_DL import PairsTradingDL
+from streamlit_system.components.session_state_management import SessionStateManager
 
 
 class EnhancedStrategyBuilder:
@@ -20,25 +20,22 @@ class EnhancedStrategyBuilder:
     def __init__(self):
         """Initialize the strategy builder with a risk manager."""
         self.risk_manager = PairRiskManager()
+        self.session_manager = SessionStateManager()
 
     def render(self):
         """Render the strategy builder interface."""
         st.header("Strategy Builder")
 
-        if 'selected_pairs' not in st.session_state:
+        if not self.session_manager.has_required_data():
             st.warning("Please select pairs first in the Pair Analysis section.")
             return
 
-        # Strategy selection and configuration
         strategy_type = self._render_strategy_selection()
 
-        # Risk management configuration
         risk_params = self._render_risk_management()
 
-        # Backtesting configuration
         backtest_params = self._render_backtest_config()
 
-        # Create and run strategy
         if st.button("Run Backtest"):
             self._run_backtest(
                 strategy_type=strategy_type,
@@ -46,7 +43,6 @@ class EnhancedStrategyBuilder:
                 backtest_params=backtest_params
             )
 
-        # Display results if available
         if 'backtest_results' in st.session_state:
             self._display_backtest_results()
 
@@ -70,34 +66,39 @@ class EnhancedStrategyBuilder:
             col1, col2 = st.columns(2)
             with col1:
                 params.update({
-                    'entry_z_score': st.number_input(
-                        "Entry Z-Score",
+                    'zscore_threshold': st.number_input(
+                        "Z-Score Threshold",
                         min_value=0.0,
                         max_value=5.0,
                         value=2.0,
                         step=0.1
                     ),
-                    'exit_z_score': st.number_input(
-                        "Exit Z-Score",
-                        min_value=0.0,
-                        max_value=5.0,
-                        value=0.5,
-                        step=0.1
-                    )
-                })
-            with col2:
-                params.update({
                     'lookback_window': st.number_input(
                         "Lookback Window (days)",
                         min_value=10,
                         max_value=252,
                         value=63
-                    ),
+                    )
+                })
+            with col2:
+                params.update({
                     'zscore_window': st.number_input(
                         "Z-Score Window (days)",
                         min_value=5,
                         max_value=126,
                         value=21
+                    ),
+                    'min_half_life': st.number_input(
+                        "Min Half-Life (days)",
+                        min_value=1,
+                        max_value=63,
+                        value=5
+                    ),
+                    'max_half_life': st.number_input(
+                        "Max Half-Life (days)",
+                        min_value=64,
+                        max_value=252,
+                        value=126
                     )
                 })
 
@@ -105,14 +106,17 @@ class EnhancedStrategyBuilder:
             col1, col2 = st.columns(2)
             with col1:
                 params.update({
-                    'model_type': st.selectbox(
-                        "ML Model Type",
-                        ["RandomForest", "GradientBoosting", "LogisticRegression"]
-                    ),
-                    'feature_windows': st.multiselect(
-                        "Feature Windows",
+                    'lookback_windows': st.multiselect(
+                        "Lookback Windows",
                         [5, 10, 21, 63, 126],
                         default=[21, 63]
+                    ),
+                    'zscore_threshold': st.slider(
+                        "Z-Score Threshold",
+                        min_value=0.0,
+                        max_value=5.0,
+                        value=2.0,
+                        step=0.1
                     )
                 })
             with col2:
@@ -123,16 +127,15 @@ class EnhancedStrategyBuilder:
                         max_value=756,
                         value=252
                     ),
-                    'signal_threshold': st.slider(
-                        "Signal Threshold",
-                        min_value=0.0,
-                        max_value=1.0,
-                        value=0.7,
-                        step=0.05
+                    'validation_size': st.number_input(
+                        "Validation Window (days)",
+                        min_value=21,
+                        max_value=252,
+                        value=63
                     )
                 })
 
-        else:  # Deep Learning
+        else:
             col1, col2 = st.columns(2)
             with col1:
                 params.update({
@@ -147,24 +150,32 @@ class EnhancedStrategyBuilder:
                         min_value=1,
                         max_value=10,
                         value=1
+                    ),
+                    'train_size': st.number_input(
+                        "Training Window (days)",
+                        min_value=126,
+                        max_value=756,
+                        value=252
                     )
                 })
             with col2:
                 params.update({
-                    'hidden_units': st.number_input(
-                        "Hidden Units",
-                        min_value=16,
-                        max_value=256,
-                        value=64
-                    ),
-                    'dropout_rate': st.slider(
-                        "Dropout Rate",
+                    'zscore_threshold': st.slider(
+                        "Z-Score Threshold",
                         min_value=0.0,
-                        max_value=0.5,
-                        value=0.2,
+                        max_value=5.0,
+                        value=2.0,
                         step=0.1
+                    ),
+                    'validation_size': st.number_input(
+                        "Validation Window (days)",
+                        min_value=21,
+                        max_value=252,
+                        value=63
                     )
                 })
+
+        self.session_manager.update_strategy_params(strategy_type, params)
 
         return {
             'type': strategy_type,
@@ -224,13 +235,17 @@ class EnhancedStrategyBuilder:
                 step=0.5
             )
 
-        return {
+        risk_params = {
             'max_position_size': max_position_size,
             'stop_loss': stop_loss,
             'max_drawdown': max_drawdown,
             'max_correlation': max_correlation,
             'leverage_limit': leverage_limit
         }
+
+        self.session_manager.update_risk_params(risk_params)
+
+        return risk_params
 
     def _render_backtest_config(self) -> Dict:
         """
@@ -280,19 +295,25 @@ class EnhancedStrategyBuilder:
         Run backtest with configured strategy and parameters.
 
         Args:
-            strategy_type (Dict): Strategy type and parameters
-            risk_params (Dict): Risk management parameters
-            backtest_params (Dict): Backtest configuration parameters
+            strategy_type: Strategy type and parameters
+            risk_params: Risk management parameters
+            backtest_params: Backtest configuration parameters
         """
         try:
             with st.spinner("Running backtest..."):
-                # Create strategy instance
+                returns = self._get_returns_data()
+                pairs = self._get_selected_pairs()
+
                 strategy = self._create_strategy(
                     strategy_type['type'],
                     strategy_type['params']
                 )
 
-                # Configure risk manager
+                if hasattr(strategy, 'set_tradeable_pairs'):
+                    strategy.set_tradeable_pairs(pairs)
+                else:
+                    strategy.pairs = pairs
+
                 risk_manager = PairRiskManager(
                     max_position_size=risk_params['max_position_size'],
                     max_drawdown=risk_params['max_drawdown'],
@@ -301,28 +322,26 @@ class EnhancedStrategyBuilder:
                     leverage_limit=risk_params['leverage_limit']
                 )
 
-                # Create backtester
-                backtester = MultiPairBacktester(
+                backtester = MultiPairBackTester(
                     strategy=strategy,
-                    returns=self._get_returns_data(),
+                    returns=returns,
                     initial_capital=backtest_params['initial_capital'],
                     risk_manager=risk_manager,
                     transaction_cost=backtest_params['transaction_cost'],
                     max_pairs=backtest_params['max_pairs']
                 )
 
-                # Run backtest
                 equity_curve = backtester.run_backtest()
 
-                # Store results
                 st.session_state['backtest_results'] = {
                     'equity_curve': equity_curve,
-                    'metrics': backtester.calculate_performance_metrics(),
+                    'metrics': backtester._calculate_performance_metrics(),
                     'trades': backtester.trade_history,
                     'parameters': {
                         'strategy': strategy_type,
                         'risk': risk_params,
-                        'backtest': backtest_params
+                        'backtest': backtest_params,
+                        'pairs': pairs
                     }
                 }
 
@@ -331,58 +350,98 @@ class EnhancedStrategyBuilder:
         except Exception as e:
             st.error(f"Error running backtest: {str(e)}")
 
-    def _create_strategy(self, strategy_type: str, params: Dict):
+    def _get_selected_pairs(self) -> List[Tuple[str, str]]:
         """
-        Create strategy instance based on type and parameters.
-
-        Args:
-            strategy_type (str): Type of strategy to create
-            params (Dict): Strategy parameters
+        Get selected pairs from session state with strict type checking.
 
         Returns:
-            Strategy instance based on type
+            List[Tuple[str, str]]: List of validated asset pairs
         """
+        if 'selected_pairs' not in st.session_state:
+            raise ValueError("No pairs selected. Please select pairs first.")
+
+        pairs_df = st.session_state['selected_pairs']
+        validated_pairs: List[Tuple[str, str]] = []
+
+        try:
+            if 'Asset1' in pairs_df.columns and 'Asset2' in pairs_df.columns:
+                for _, row in pairs_df.iterrows():
+                    asset1, asset2 = str(row['Asset1']), str(row['Asset2'])
+                    validated_pairs.append((min(asset1, asset2), max(asset1, asset2)))
+
+            elif 'Pair' in pairs_df.columns:
+                for pair in pairs_df['Pair']:
+                    if isinstance(pair, str) and '/' in pair:
+                        assets = pair.split('/')
+                        if len(assets) == 2:
+                            asset1, asset2 = str(assets[0]), str(assets[1])
+                            validated_pairs.append((min(asset1, asset2), max(asset1, asset2)))
+
+            if not validated_pairs:
+                raise ValueError("Could not extract valid pairs from selected pairs data")
+
+            if 'historical_data' in st.session_state:
+                data = st.session_state['historical_data']
+                available_tickers = set(data['ticker'].unique())
+
+                valid_pairs = [
+                    pair for pair in validated_pairs
+                    if pair[0] in available_tickers and pair[1] in available_tickers
+                ]
+
+                if not valid_pairs:
+                    raise ValueError("No valid pairs found in historical data")
+
+                return valid_pairs
+
+            return validated_pairs
+
+        except Exception as e:
+            raise ValueError(f"Error validating pairs: {str(e)}")
+
+    def _create_strategy(self, strategy_type: str, params: Dict):
+        """Create strategy instance based on type and parameters."""
         if strategy_type == "Statistical":
-            return StatisticalPairsTrader(
+            return EnhancedStatPairsStrategy(
                 lookback_window=params['lookback_window'],
-                zscore_window=params['zscore_window'],
-                entry_z_score=params['entry_z_score'],
-                exit_z_score=params['exit_z_score']
+                zscore_entry=params['zscore_threshold'],
+                zscore_exit=params['zscore_threshold'] * 0.5,
+                min_half_life=params['min_half_life'],
+                max_half_life=params['max_half_life'],
+                max_spread_vol=0.1,
+                min_correlation=0.5
             )
 
         elif strategy_type == "Machine Learning":
-            return PairsTraderML(
-                model_type=params['model_type'],
-                feature_windows=params['feature_windows'],
-                train_size=params['train_size'],
-                signal_threshold=params['signal_threshold']
+            return MLPairsStrategy(
+                initial_capital=1_000_000.0,
+                lookback_window=max(params['lookback_windows']),
+                model_confidence_threshold=0.6,
+                zscore_threshold=params['zscore_threshold'],
             )
 
-        else:  # Deep Learning
+        else:
             return PairsTradingDL(
                 sequence_length=params['sequence_length'],
                 prediction_horizon=params['prediction_horizon'],
-                hidden_units=params['hidden_units'],
-                dropout_rate=params['dropout_rate']
+                zscore_threshold=params['zscore_threshold'],
+                min_confidence=0.6,
+                max_position_size=0.1,
             )
 
     def _display_backtest_results(self):
         """Display comprehensive backtest results."""
         results = st.session_state['backtest_results']
 
-        # Summary metrics
         self._display_summary_metrics(results['metrics'])
 
-        # Performance charts
         self._display_performance_charts(
             results['equity_curve'],
             results['trades']
         )
 
-        # Trade analysis
         self._display_trade_analysis(results['trades'])
 
-        # Risk analysis
         self._display_risk_analysis(
             results['equity_curve'],
             results['trades']
@@ -423,7 +482,6 @@ class EnhancedStrategyBuilder:
             equity_curve (pd.Series): Portfolio equity curve
             trades (pd.DataFrame): Trade history
         """
-        # Create subplots
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -431,7 +489,6 @@ class EnhancedStrategyBuilder:
             vertical_spacing=0.12
         )
 
-        # Plot equity curve
         fig.add_trace(
             go.Scatter(
                 x=equity_curve.index,
@@ -442,7 +499,6 @@ class EnhancedStrategyBuilder:
             row=1, col=1
         )
 
-        # Add trade markers
         for trade_type in ['ENTRY', 'EXIT']:
             trade_points = trades[trades['Action'] == trade_type]
             fig.add_trace(
@@ -459,7 +515,6 @@ class EnhancedStrategyBuilder:
                 row=1, col=1
             )
 
-        # Plot drawdown
         drawdown = (equity_curve - equity_curve.cummax()) / equity_curve.cummax()
         fig.add_trace(
             go.Scatter(
@@ -484,7 +539,6 @@ class EnhancedStrategyBuilder:
         """
         st.subheader("Trade Analysis")
 
-        # Trade statistics by pair
         trade_stats = trades.groupby('Pair').agg({
             'PnL': ['count', 'mean', 'sum'],
             'Duration': 'mean',
@@ -499,7 +553,6 @@ class EnhancedStrategyBuilder:
         ]
         st.dataframe(trade_stats)
 
-        # Trade distribution plot
         fig = go.Figure()
         fig.add_trace(
             go.Histogram(
@@ -526,7 +579,6 @@ class EnhancedStrategyBuilder:
         """
         st.subheader("Risk Analysis")
 
-        # Calculate risk metrics
         returns = equity_curve.pct_change().dropna()
         rolling_vol = returns.rolling(window=21).std() * np.sqrt(252)
         rolling_sharpe = (returns.rolling(window=63).mean() * 252) / \
@@ -534,7 +586,6 @@ class EnhancedStrategyBuilder:
         var_95 = np.percentile(returns, 5)
         var_99 = np.percentile(returns, 1)
 
-        # Display risk metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.metric(
@@ -557,7 +608,6 @@ class EnhancedStrategyBuilder:
                 f"{trades['Quantity'].abs().mean():.2f}"
             )
 
-        # Risk visualization
         fig = make_subplots(
             rows=2,
             cols=2,
@@ -569,7 +619,6 @@ class EnhancedStrategyBuilder:
             ]
         )
 
-        # Rolling volatility
         fig.add_trace(
             go.Scatter(
                 x=rolling_vol.index,
@@ -579,7 +628,6 @@ class EnhancedStrategyBuilder:
             row=1, col=1
         )
 
-        # Rolling Sharpe
         fig.add_trace(
             go.Scatter(
                 x=rolling_sharpe.index,
@@ -589,7 +637,6 @@ class EnhancedStrategyBuilder:
             row=1, col=2
         )
 
-        # Return distribution
         fig.add_trace(
             go.Histogram(
                 x=returns.values,
@@ -599,7 +646,6 @@ class EnhancedStrategyBuilder:
             row=2, col=1
         )
 
-        # Position exposure
         daily_exposure = trades.groupby('Date')['Quantity'].sum().abs()
         fig.add_trace(
             go.Scatter(
@@ -622,7 +668,6 @@ class EnhancedStrategyBuilder:
         """
         st.subheader("Pair Performance Analysis")
 
-        # Pair performance metrics
         pair_metrics = trades.groupby('Pair').agg({
             'PnL': [
                 'count',
@@ -649,13 +694,10 @@ class EnhancedStrategyBuilder:
             'Total Costs'
         ]
 
-        # Display pair metrics
         st.dataframe(pair_metrics)
 
-        # Pair performance visualization
         fig = go.Figure()
 
-        # Scatter plot of win rate vs average PnL
         fig.add_trace(
             go.Scatter(
                 x=pair_metrics['Win Rate'],
@@ -686,14 +728,12 @@ class EnhancedStrategyBuilder:
         """
         st.subheader("Market Condition Analysis")
 
-        # Calculate market regime
         market_returns = market_data.pct_change()
         market_vol = market_returns.rolling(window=21).std()
 
         conditions = pd.qcut(market_vol, q=3, labels=['Low Vol', 'Med Vol', 'High Vol'])
         trades['Market_Regime'] = trades['Date'].map(conditions)
 
-        # Performance by market regime
         regime_performance = trades.groupby('Market_Regime').agg({
             'PnL': ['count', 'sum', 'mean', lambda x: (x > 0).mean()],
             'Duration': 'mean'
@@ -709,7 +749,6 @@ class EnhancedStrategyBuilder:
 
         st.dataframe(regime_performance)
 
-        # Visualization
         fig = make_subplots(
             rows=1,
             cols=2,
@@ -719,7 +758,6 @@ class EnhancedStrategyBuilder:
             ]
         )
 
-        # PnL box plot
         fig.add_trace(
             go.Box(
                 y=trades['PnL'],
@@ -729,7 +767,6 @@ class EnhancedStrategyBuilder:
             row=1, col=1
         )
 
-        # Win rate bar plot
         win_rates = trades.groupby('Market_Regime')['PnL'].apply(
             lambda x: (x > 0).mean()
         )
@@ -756,7 +793,6 @@ class EnhancedStrategyBuilder:
         """
         st.subheader("Strategy Behavior Analysis")
 
-        # Trading activity over time
         monthly_activity = trades.groupby(
             pd.Grouper(key='Date', freq='M')
         ).agg({
@@ -771,7 +807,6 @@ class EnhancedStrategyBuilder:
             'Total Costs'
         ]
 
-        # Visualization
         fig = make_subplots(
             rows=2,
             cols=2,
@@ -783,7 +818,6 @@ class EnhancedStrategyBuilder:
             ]
         )
 
-        # Trading activity
         fig.add_trace(
             go.Scatter(
                 x=monthly_activity.index,
@@ -793,7 +827,6 @@ class EnhancedStrategyBuilder:
             row=1, col=1
         )
 
-        # PnL vs Duration scatter
         fig.add_trace(
             go.Scatter(
                 x=trades['Duration'],
@@ -804,7 +837,6 @@ class EnhancedStrategyBuilder:
             row=1, col=2
         )
 
-        # Trade size distribution
         fig.add_trace(
             go.Histogram(
                 x=trades['Quantity'].abs(),
@@ -813,7 +845,6 @@ class EnhancedStrategyBuilder:
             row=2, col=1
         )
 
-        # Hour of day analysis
         if 'Date' in trades.columns:
             trades['Hour'] = trades['Date'].dt.hour
             hourly_pnl = trades.groupby('Hour')['PnL'].mean()
@@ -838,34 +869,28 @@ class EnhancedStrategyBuilder:
 
         results = st.session_state['backtest_results']
 
-        # Create Excel writer
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            # Write equity curve
             results['equity_curve'].to_excel(
                 writer,
                 sheet_name='Equity_Curve'
             )
 
-            # Write trades
             results['trades'].to_excel(
                 writer,
                 sheet_name='Trades'
             )
 
-            # Write metrics
             pd.DataFrame([results['metrics']]).to_excel(
                 writer,
                 sheet_name='Metrics'
             )
 
-            # Write parameters
             pd.DataFrame([results['parameters']]).to_excel(
                 writer,
                 sheet_name='Parameters'
             )
 
-        # Offer download
         buffer.seek(0)
         st.download_button(
             label="Download Results",

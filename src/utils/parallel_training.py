@@ -7,7 +7,6 @@ Enhances computational efficiency for model training tasks by using multiprocess
 import multiprocessing
 from multiprocessing import Pool
 from typing import List, Tuple, Callable, Any, Dict
-from functools import partial
 from config.logging_config import logger
 
 

@@ -1,87 +1,400 @@
 """
-Pairs Trading with Deep Learning (Corrected for Look-Ahead Bias)
+Deep Learning Pairs Trading Strategy Module
 
-This module implements deep learning models_data for pairs trading with proper
-temporal handling to prevent look-ahead bias in:
-1. Sequence preparation
-2. Feature engineering
-3. Model training and validation
-4. Signal generation
+Implements a pairs trading strategy using deep learning models with full integration
+into the backtesting system, proper risk management, and optimization support.
 """
 
+from typing import Dict, List, Tuple, Optional
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass, field
 from sklearn.preprocessing import StandardScaler
-import plotly.graph_objects as go
-from sklearn.model_selection import TimeSeriesSplit
-from config.logging_config import logger
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import coint
+from itertools import combinations
+
+from config.settings import DATA_DIR
+from src.strategy.base import BaseStrategy
 from src.models import DeepLearningModel
+from config.logging_config import logger
+from pathlib import Path
+import json
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 
-class PairsTradingDL:
-    """Deep learning based pairs trading implementation."""
+@dataclass
+class DLPairPosition:
+    """Track position details for a deep learning pair trade."""
+    asset1: str
+    asset2: str
+    quantity: float
+    entry_price1: float
+    entry_price2: float
+    entry_date: pd.Timestamp
+    hedge_ratio: float
+    entry_confidence: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    entry_spread: float = 0.0
+    peak_pnl: float = 0.0
+    current_drawdown: float = 0.0
+    transaction_costs: float = 0.0
+    model_confidence: float = 0.0
+    trades: List[Dict] = field(default_factory=list)
 
-    def __init__(self,
-                 sequence_length: int = 20,
-                 prediction_horizon: int = 1,
-                 zscore_threshold: float = 2.0,
-                 train_size: int = 252,
-                 validation_size: int = 63):
-        """
-        Initialize the pairs trading model.
+    def update_metrics(self,
+                      current_price1: float,
+                      current_price2: float,
+                      current_confidence: float) -> None:
+        """Update position metrics including model confidence."""
+        current_spread = current_price1 - self.hedge_ratio * current_price2
+        spread_pnl = self.quantity * (current_spread - self.entry_spread)
 
-        Args:
-            sequence_length: Length of input sequences
-            prediction_horizon: Steps ahead to predict
-            zscore_threshold: Threshold for trading signals
-            train_size: Number of periods for training
-            validation_size: Number of periods for validation
-        """
+        self.peak_pnl = max(self.peak_pnl, spread_pnl)
+        self.current_drawdown = (self.peak_pnl - spread_pnl) / abs(self.peak_pnl) if self.peak_pnl != 0 else 0
+        self.model_confidence = current_confidence
+
+
+class PairsTradingDL(BaseStrategy):
+    """Deep learning based pairs trading strategy with full backtesting integration."""
+
+    def __init__(
+            self,
+            sequence_length: int = 20,
+            prediction_horizon: int = 1,
+            zscore_threshold: float = 2.0,
+            min_confidence: float = 0.6,
+            max_position_size: float = 0.1,
+            stop_loss: float = 0.02,
+            take_profit: float = 0.04,
+            max_drawdown: float = 0.2,
+            max_pairs: int = 10,
+            transaction_cost: float = 0.001,
+            model_dir: Optional[Path] = None
+    ):
+        """Initialize the strategy."""
+        super().__init__(
+            name="PairsTradingDL",
+            max_position_size=max_position_size
+        )
+
+        self.pair_models = None
+        self.validation_size = 0.2
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
         self.zscore_threshold = zscore_threshold
-        self.train_size = train_size
-        self.validation_size = validation_size
-        self.dl_model = DeepLearningModel()
-        self.scaler = StandardScaler()
+        self.min_confidence = min_confidence
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        self.max_drawdown = max_drawdown
+        self.max_pairs = max_pairs
+        self.transaction_cost = transaction_cost
+        self.model_dir = model_dir or Path("pairs_trading_DL_outputs/dl_pairs")
 
-    def prepare_sequences(self,
-                          data: pd.DataFrame,
-                          target_column: str,
-                          start_idx: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+        self.spread_predictor = DeepLearningModel()
+        self.signal_classifier = DeepLearningModel()
+        self.feature_scaler = StandardScaler()
+
+        self.positions: Dict[Tuple[str, str], DLPairPosition] = {}
+        self.pairs: List[Tuple[str, str]] = []
+        self.hedge_ratios: Dict[Tuple[str, str], float] = {}
+        self.current_portfolio_value: float = 0.0
+
+        self.validate_parameters()
+        self._setup_models()
+
+    def clear_state(self) -> None:
+        """Clear strategy state between runs instead of using reset."""
+        self.correlation_analyzer = None
+        self.pairs = []
+        self.positions = {}
+        self.hedge_ratios = {}
+        self._portfolio_value = 0.0
+
+    def validate_parameters(self) -> None:
+        """Validate strategy parameters."""
+        if self.sequence_length < 1:
+            raise ValueError("sequence_length must be positive")
+        if not 0 < self.zscore_threshold:
+            raise ValueError("zscore_threshold must be positive")
+        if not 0 < self.min_confidence < 1:
+            raise ValueError("min_confidence must be between 0 and 1")
+        if not 0 < self.max_position_size <= 1:
+            raise ValueError("max_position_size must be between 0 and 1")
+        if not 0 < self.stop_loss < 1:
+            raise ValueError("stop_loss must be between 0 and 1")
+        if not 0 < self.take_profit < 1:
+            raise ValueError("take_profit must be between 0 and 1")
+
+    def calculate_position_size(self,
+                             pair: Tuple[str, str],
+                             prices: pd.DataFrame,
+                             confidence: float) -> float:
         """
-        Prepare sequences without look-ahead bias.
+        Calculate position size based on model confidence and constraints.
+        Args:
+            pair: Asset pair
+            prices: Price data
+            confidence: Model confidence score
+        Returns:
+            float: Position size in units
+        """
+        asset1, asset2 = pair
+        price1 = prices[asset1].iloc[-1]
+        price2 = prices[asset2].iloc[-1]
+
+        spread = prices[asset1] - prices[asset2]
+        spread_vol = spread.rolling(window=self.sequence_length).std().iloc[-1]
+
+        vol_adjustment = 1.0 / (1.0 + spread_vol) if spread_vol > 0 else 1.0
+        position_size = self.max_position_size * confidence * vol_adjustment
+
+        max_trade_value = self.current_portfolio_value * position_size
+        pair_value = price1 + price2
+
+        position_size = (max_trade_value / pair_value)
+
+        position_size *= (1 - self.transaction_cost)
+
+        return position_size
+
+    def find_trading_pairs(self, prices: pd.DataFrame) -> List[Tuple[str, str]]:
+        """Find suitable trading pairs using correlation and cointegration."""
+        valid_pairs = []
+        n_assets = len(prices.columns)
+
+        for i, j in combinations(range(n_assets), 2):
+            asset1, asset2 = prices.columns[i], prices.columns[j]
+
+            correlation = prices[asset1].corr(prices[asset2])
+            if abs(correlation) < 0.5:
+                continue
+
+            _, pvalue,_ = coint(prices[asset1], prices[asset2])
+            if pvalue > 0.05:
+                continue
+
+            model = sm.OLS(prices[asset1], prices[asset2]).fit()
+            hedge_ratio = model.params[0]
+
+            valid_pairs.append((asset1, asset2))
+            self.hedge_ratios[(asset1, asset2)] = hedge_ratio
+
+            if len(valid_pairs) >= self.max_pairs:
+                break
+
+        self.pairs = valid_pairs
+        return valid_pairs
+
+    def predict_signals(self, pair_data: pd.DataFrame) -> pd.DataFrame:
+        """Generate trading predictions using the trained models."""
+        X_spread, _ = self.prepare_sequences(
+            pair_data,
+            'spread',
+            feature_columns=['spread', 'ratio', 'return1', 'return2']
+        )
+
+        X_spread_scaled = self.feature_scaler.transform(X_spread.reshape(-1, X_spread.shape[-1]))
+        X_spread_scaled = X_spread_scaled.reshape(X_spread.shape)
+
+        spread_pred = self.spread_predictor.predict(X_spread_scaled)
+        signal_prob = self.signal_classifier.predict(X_spread_scaled)
+
+        predictions = pd.DataFrame(index=pair_data.index[self.sequence_length:])
+        predictions['spread_prediction'] = spread_pred
+        predictions['signal_probability'] = signal_prob
+
+        zscore = (pair_data['spread'] - pair_data['spread_ma']) / pair_data['spread_std']
+        predictions['predicted_signal'] = 0
+
+        predictions.loc[(zscore < -self.zscore_threshold) &
+                       (predictions['signal_probability'] > self.min_confidence),
+                       'predicted_signal'] = 1
+
+        predictions.loc[(zscore > self.zscore_threshold) &
+                       (predictions['signal_probability'] > self.min_confidence),
+                       'predicted_signal'] = -1
+
+        return predictions
+
+    def initialize_models(self, train_data: pd.DataFrame) -> None:
+        """
+        Initialize and train deep learning models for each pair.
 
         Args:
-            data: Input DataFrame
-            target_column: Column to predict
-            start_idx: Starting index for sequence preparation
-
-        Returns:
-            Tuple of (sequences, targets)
+            train_data: DataFrame with asset returns for training period
         """
-        if start_idx is None:
-            start_idx = self.sequence_length
+        logger.info("Initializing deep learning models for pairs trading")
 
-        sequences = []
-        targets = []
+        if not self.pairs:
+            self.pairs = self.find_trading_pairs(train_data)
 
-        for i in range(start_idx, len(data) - self.prediction_horizon):
-            seq = data.iloc[i - self.sequence_length:i].values
-            target = data.iloc[i + self.prediction_horizon - 1][target_column]
+        for pair in self.pairs:
+            try:
+                asset1, asset2 = pair
+                logger.info(f"Training models for pair {asset1}-{asset2}")
 
-            sequences.append(seq)
-            targets.append(target)
+                # Prepare pair data with features
+                pair_data = self.prepare_pair_data(
+                    stock1_prices=train_data[asset1],
+                    stock2_prices=train_data[asset2],
+                    start_idx=self.sequence_length
+                )
 
-        return np.array(sequences), np.array(targets)
+                # Prepare sequences for spread prediction
+                X_spread, y_spread = self.spread_predictor.prepare_sequences(
+                    data=pair_data,
+                    target_column='spread',
+                    feature_columns=['spread', 'ratio', 'return1', 'return2',
+                                     'spread_ma', 'spread_std', 'spread_zscore',
+                                     'momentum1', 'momentum2', 'spread_vol',
+                                     'rolling_corr'],
+                    sequence_length=self.sequence_length
+                )
+
+                # Split data for spread predictor
+                train_size = len(X_spread) - int(self.validation_size * len(X_spread))
+                X_train_spread = X_spread[:train_size]
+                X_val_spread = X_spread[train_size:]
+                y_train_spread = y_spread[:train_size]
+                y_val_spread = y_spread[train_size:]
+
+                # Build and train spread predictor
+                self.spread_predictor.build_lstm_model(
+                    input_shape=(self.sequence_length, X_spread.shape[2]),
+                    lstm_units=[128, 64],
+                    dense_units=[32],
+                    dropout_rate=0.2
+                )
+
+                # Train spread predictor model
+                self.spread_predictor.train_model(
+                    X_train_spread, y_train_spread,
+                    X_val_spread, y_val_spread,
+                    epochs=100,
+                    batch_size=32,
+                    patience=10,
+                    model_prefix=f"spread_predictor_{asset1}_{asset2}"
+                )
+
+                # Generate signals for classification
+                predictions = self.predict_signals(pair_data)
+
+                # Prepare data for signal classifier
+                X_signal, y_signal = self.signal_classifier.prepare_sequences(
+                    data=pair_data,
+                    target_column='predicted_signal',
+                    feature_columns=[
+                        'RSI_stock1', 'RSI_stock2',
+                        'MACD_stock1', 'MACD_stock2',
+                        'BB_Upper_stock1', 'BB_Lower_stock1',
+                        'BB_Upper_stock2', 'BB_Lower_stock2',
+                        'SIMPLE_MA_20_stock1', 'SIMPLE_MA_20_stock2',
+                        'EXP_MA_20_stock1', 'EXP_MA_20_stock2',
+                
+                        'Close_stock1', 'Close_stock2', 'Volume_stock2', 'Volume_stock1',
+                        'Volume_ROC_stock1', 'Volume_ROC_stock2',
+                
+                        'rolling_corr',
+                        'spread_zscore'
+                    ], 
+                    sequence_length=self.sequence_length
+                )
+
+                # Split data for signal classifier
+                X_train_signal = X_signal[:train_size]
+                X_val_signal = X_signal[train_size:]
+                y_train_signal = y_signal[:train_size]
+                y_val_signal = y_signal[train_size:]
+
+                # Build and train signal classifier
+                self.signal_classifier.build_lstm_model(
+                    input_shape=(self.sequence_length, X_signal.shape[2]),
+                    lstm_units=[64, 32],
+                    dense_units=[16],
+                    dropout_rate=0.2
+                )
+
+                self.signal_classifier.train_model(
+                    X_train_signal, y_train_signal,
+                    X_val_signal, y_val_signal,
+                    epochs=100,
+                    batch_size=32,
+                    patience=10,
+                    model_prefix=f"signal_classifier_{asset1}_{asset2}"
+                )
+
+                # Store models and metadata
+                self.pair_models[pair] = {
+                    'spread_predictor': self.spread_predictor,
+                    'signal_classifier': self.signal_classifier,
+                    'features': pair_data.columns.tolist(),
+                    'metrics': {
+                        'spread_predictor': self.spread_predictor.evaluate_model(
+                            X_val_spread, y_val_spread, task='regression'
+                        ),
+                        'signal_classifier': self.signal_classifier.evaluate_model(
+                            X_val_signal, y_val_signal, task='classification'
+                        )
+                    }
+                }
+
+                logger.info(f"Successfully trained models for {asset1}-{asset2}")
+
+            except Exception as e:
+                logger.error(f"Error training models for pair {pair}: {str(e)}")
+                continue
+
+        if not self.pair_models:
+            raise ValueError("No models could be trained successfully")
+
+    def _setup_models(self) -> None:
+        """Initialize and configure the deep learning models."""
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.spread_model_path = self.model_dir / "spread_predictor"
+        self.signal_model_path = self.model_dir / "signal_classifier"
+
+        try:
+            self.spread_predictor.load_model(str(self.spread_model_path))
+            self.signal_classifier.load_model(str(self.signal_model_path))
+            logger.info("Loaded existing models")
+        except (FileNotFoundError, ValueError) as e:
+            logger.warning(f"Could not load existing models: {e}")
+            logger.info("Models will be trained on first data")
+
+    def reset(self) -> None:
+        """Reset strategy state between optimization runs."""
+        self.clear_state()
+        self.positions = {}
+        self.pairs = []
+        self.hedge_ratios = {}
+        self.current_portfolio_value = 0.0
+
+        self.spread_predictor = DeepLearningModel()
+        self.signal_classifier = DeepLearningModel()
+        self.feature_scaler = StandardScaler()
+
+        self._setup_models()
+
+    @property
+    def optimization_parameters(self) -> Dict:
+        """Define parameters for optimization."""
+        return {
+            'sequence_length': (10, 50),
+            'zscore_threshold': (1.0, 3.0),
+            'min_confidence': (0.6, 0.9),
+            'stop_loss': (0.01, 0.05),
+            'take_profit': (0.02, 0.08)
+        }
 
     def prepare_pair_data(self,
-                          stock1_prices: pd.Series,
-                          stock2_prices: pd.Series,
-                          start_idx: Optional[int] = None) -> pd.DataFrame:
+                         stock1_prices: pd.Series,
+                         stock2_prices: pd.Series,
+                         start_idx: Optional[int] = None) -> pd.DataFrame:
         """
-        Prepare pair data using expanding windows.
+        Prepare pair data using expanding windows to prevent look-ahead bias.
 
         Args:
             stock1_prices: First stock prices
@@ -89,7 +402,7 @@ class PairsTradingDL:
             start_idx: Starting index for calculations
 
         Returns:
-            DataFrame with feature_engineering
+            DataFrame with features
         """
         if start_idx is None:
             start_idx = self.sequence_length
@@ -118,8 +431,15 @@ class PairsTradingDL:
             data[f'{col}_std'] = roll_std
             data[f'{col}_zscore'] = (data[col] - roll_mean) / roll_std
 
-        data['rolling_corr'] = stock1_prices.rolling(21).corr(stock2_prices)
-        data['spread_vol'] = spread.rolling(21).std()
+        data['rolling_corr'] = stock1_prices.rolling(
+            window=self.sequence_length
+        ).corr(stock2_prices)
+        data['spread_vol'] = spread.rolling(
+            window=self.sequence_length
+        ).std()
+
+        data['momentum1'] = stock1_prices.pct_change(self.sequence_length)
+        data['momentum2'] = stock2_prices.pct_change(self.sequence_length)
 
         data = data.dropna()
 
@@ -128,326 +448,479 @@ class PairsTradingDL:
 
         return data
 
-    def generate_labels(self,
-                        data: pd.DataFrame,
-                        forward_looking: bool = False) -> pd.DataFrame:
+    def prepare_sequences(self,
+                         data: pd.DataFrame,
+                         target_column: str,
+                         feature_columns: Optional[List[str]] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepare sequences for model training."""
+        if feature_columns is None:
+            feature_columns = data.columns.tolist()
+            feature_columns.remove(target_column)
+
+        sequences = []
+        targets = []
+
+        for i in range(self.sequence_length, len(data) - self.prediction_horizon + 1):
+            sequence = data[feature_columns].iloc[i - self.sequence_length:i].values
+            target = data[target_column].iloc[i + self.prediction_horizon - 1]
+
+            sequences.append(sequence)
+            targets.append(target)
+
+        return np.array(sequences), np.array(targets)
+
+    def generate_signals(self, prices: pd.DataFrame) -> pd.DataFrame:
         """
-        Generate trading signals and labels.
+        Generate trading signals compatible with backtester.
 
         Args:
-            data: Feature DataFrame
-            forward_looking: Whether to include forward returns
+            prices: Price data for all assets
 
         Returns:
-            DataFrame with labels
+            DataFrame with signals (-1, 0, 1) for each pair
         """
-        result = data.copy()
+        signals = pd.DataFrame(index=prices.index)
 
-        result['signal'] = 0
-        result.loc[result['spread_zscore'] > self.zscore_threshold, 'signal'] = -1
-        result.loc[result['spread_zscore'] < -self.zscore_threshold, 'signal'] = 1
+        if not self.pairs:
+            self.find_trading_pairs(prices)
 
-        result['target'] = (result['signal'] != 0).astype(int)
+        for pair in self.pairs:
+            try:
+                asset1, asset2 = pair
+                if asset1 not in prices.columns or asset2 not in prices.columns:
+                    continue
 
-        if forward_looking:
-            result['forward_spread'] = result['spread'].shift(-self.prediction_horizon)
-            result['forward_return'] = result['spread'].pct_change(self.prediction_horizon)
-
-        return result.dropna()
-
-    def walk_forward_validation(self,
-                                features: pd.DataFrame) -> List[Dict]:
-        """
-        Perform walk-forward validation.
-
-        Args:
-            features: Feature DataFrame
-
-        Returns:
-            List of results for each validation period
-        """
-        results = []
-        tscv = TimeSeriesSplit(
-            n_splits=5,
-            test_size=self.validation_size,
-            gap=self.sequence_length
-        )
-
-        for train_idx, val_idx in tscv.split(features):
-            train_data = features.iloc[train_idx]
-            val_data = features.iloc[val_idx]
-
-            X_train, y_train = self.prepare_sequences(
-                train_data,
-                'spread',
-                start_idx=self.sequence_length
-            )
-
-            X_val, y_val = self.prepare_sequences(
-                val_data,
-                'spread',
-                start_idx=self.sequence_length
-            )
-
-            spread_model = self.train_spread_predictor(
-                X_train, y_train,
-                X_val, y_val
-            )
-
-            signal_model = self.train_signal_classifier(
-                train_data,
-                val_data
-            )
-
-            predictions = self.predict_signals(
-                {'spread_predictor': spread_model,
-                 'signal_classifier': signal_model},
-                val_data
-            )
-
-            results.append({
-                'train_period': (features.index[train_idx[0]],
-                                 features.index[train_idx[-1]]),
-                'val_period': (features.index[val_idx[0]],
-                               features.index[val_idx[-1]]),
-                'predictions': predictions,
-                'models_data': {
-                    'spread_predictor': spread_model,
-                    'signal_classifier': signal_model
-                }
-            })
-
-        return results
-
-    def train_spread_predictor(self,
-                           X_train: np.ndarray,
-                           y_train: np.ndarray,
-                           X_val: np.ndarray,
-                           y_val: np.ndarray) -> Dict:
-        """Train LSTM model for spread prediction."""
-        X_train_scaled = np.array([self.scaler.fit_transform(x) for x in X_train])
-        X_val_scaled = np.array([self.scaler.transform(x) for x in X_val])
-
-        model = self.dl_model.train_lstm_model(
-            X_train_scaled, y_train,
-            X_val_scaled, y_val,
-            units=64,
-            dropout=0.2,
-            epochs=100,
-            batch_size=32
-        )
-
-        metrics = self.dl_model.evaluate_lstm_model(
-            model,
-            X_val_scaled,
-            y_val
-        )
-
-        return {
-            'model': model,
-            'scaler': self.scaler,
-            'metrics': metrics,
-            'history': self.dl_model._history
-        }
-
-    def train_signal_classifier(self,
-                                train_data: pd.DataFrame,
-                                val_data: pd.DataFrame) -> Dict:
-        """Train dense model for signal classification."""
-        feature_cols = ['spread_zscore', 'ratio_zscore', 'spread_ma',
-                        'return1', 'return2', "rolling_corr", "spread_vol"]
-
-        X_train = train_data[feature_cols].values
-        y_train = train_data['target'].values
-        X_val = val_data[feature_cols].values
-        y_val = val_data['target'].values
-
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_val_scaled = self.scaler.transform(X_val)
-
-        model = self.dl_model.build_dense_model(input_dim=len(feature_cols), layers=[64, 32], dropout=0.3)
-
-        history = self.dl_model.train_dense_model(
-            model,
-            X_train_scaled, y_train,
-            X_val_scaled, y_val,
-            epochs=100,
-            batch_size=32
-        )
-
-        metrics = self.dl_model.evaluate_dense_model(
-            model,
-            X_val_scaled,
-            y_val
-        )
-
-        return {
-            'model': model,
-            'scaler': self.scaler,
-            'metrics': metrics,
-            'history': history,
-            'feature_cols': feature_cols
-        }
-
-    def predict_signals(self,
-                        models: Dict,
-                        new_data: pd.DataFrame) -> pd.DataFrame:
-        """Generate trading predictions."""
-        predictions = pd.DataFrame(index=new_data.index)
-
-        X_spread, _ = self.prepare_sequences(
-            new_data,
-            'spread',
-            start_idx=self.sequence_length
-        )
-
-        X_spread_scaled = np.array([
-            models['spread_predictor']['scaler'].transform(x)
-            for x in X_spread
-        ])
-        spread_pred = models['spread_predictor']['model'].predict(X_spread_scaled)
-
-        X_signal = new_data[models['signal_classifier']['feature_cols']].values
-        X_signal_scaled = models['signal_classifier']['scaler'].transform(X_signal)
-
-        signal_prob = models['signal_classifier']['model'].predict(X_signal_scaled)
-
-        predictions['spread_prediction'] = np.nan
-        predictions.iloc[self.sequence_length:]['spread_prediction'] = spread_pred
-        predictions['signal_probability'] = signal_prob
-        predictions['predicted_signal'] = (signal_prob > 0.5).astype(int)
-
-        return predictions
-
-    def plot_walk_forward_results(self,
-                                  results: List[Dict],
-                                  actual_spread: pd.Series) -> None:
-        """Plot walk-forward validation results."""
-        fig = go.Figure()
-
-        fig.add_trace(go.Scatter(
-            x=actual_spread.index,
-            y=actual_spread,
-            mode='lines',
-            name='Actual Spread'
-        ))
-
-        for result in results:
-            val_start, val_end = result['val_period']
-            predictions = result['predictions']
-
-            mask = ~predictions['spread_prediction'].isna()
-            if mask.any():
-                fig.add_trace(go.Scatter(
-                    x=predictions.index[mask],
-                    y=predictions.loc[mask, 'spread_prediction'],
-                    mode='lines',
-                    line=dict(dash='dash'),
-                    name=f'Predicted Spread ({val_start.date()})'
-                ))
-
-            for signal_val, color, name in zip(
-                    [1, 0],
-                    ['green', 'red'],
-                    ['Long', 'Short']
-            ):
-                signal_mask = np.array(predictions['predicted_signal'] == signal_val)
-                if signal_mask.any():
-                    fig.add_trace(go.Scatter(
-                        x=predictions.index[signal_mask],
-                        y=actual_spread[predictions.index[signal_mask]],
-                        mode='markers',
-                        marker=dict(color=color, size=10),
-                        name=f'{name} Signal ({val_start.date()})'
-                    ))
-
-            for x in [val_start, val_end]:
-                fig.add_vline(
-                    x=x,
-                    line_dash="dash",
-                    line_color="gray",
-                    opacity=0.5
+                pair_data = self.prepare_pair_data(
+                    prices[asset1],
+                    prices[asset2]
                 )
 
-        fig.update_layout(
-            title='Walk-Forward Validation Results (Deep Learning)',
-            xaxis_title='Date',
-            yaxis_title='Spread',
-            template='plotly_white'
+                predictions = self.predict_signals(pair_data)
+                pair_signals = pd.Series(0, index=prices.index)
+
+                signal_mask = predictions['signal_probability'] > self.min_confidence
+                pair_signals[signal_mask] = predictions.loc[signal_mask, 'predicted_signal']
+
+                if not pair_signals.empty and pair_signals.iloc[-1] != 0:
+                    confidence = predictions.loc[signal_mask, 'signal_probability'].iloc[-1]
+                    position_size = self.calculate_position_size(
+                        pair,
+                        prices,
+                        confidence
+                    )
+                    pair_signals *= position_size
+
+                signals[pair] = pair_signals
+
+            except Exception as e:
+                logger.error(f"Error generating signals for {pair}: {str(e)}")
+                continue
+
+        return signals
+
+    def update_positions(self,
+                        current_prices: pd.Series,
+                        timestamp: pd.Timestamp) -> None:
+        """
+        Update position metrics and check risk limits.
+
+        Args:
+            current_prices: Current asset prices
+            timestamp: Current timestamp
+        """
+        for pair, position in list(self.positions.items()):
+            asset1, asset2 = pair
+
+            if asset1 not in current_prices or asset2 not in current_prices:
+                self._close_position(timestamp, pair, "Assets not available")
+                continue
+
+            current_price1 = current_prices[asset1]
+            current_price2 = current_prices[asset2]
+
+            pair_data = self.prepare_pair_data(
+                pd.Series(current_price1),
+                pd.Series(current_price2)
+            )
+            current_predictions = self.predict_signals(pair_data)
+            current_confidence = current_predictions['signal_probability'].iloc[-1]
+
+            position.update_metrics(current_price1, current_price2, current_confidence)
+
+            if position.current_drawdown > self.stop_loss:
+                self._close_position(timestamp, pair, "Stop loss triggered")
+                continue
+
+            current_spread = current_price1 - position.hedge_ratio * current_price2
+            profit_pct = abs(current_spread - position.entry_spread) / abs(position.entry_spread)
+
+            if profit_pct > self.take_profit:
+                self._close_position(timestamp, pair, "Take profit triggered")
+                continue
+
+            if position.model_confidence < self.min_confidence:
+                self._close_position(timestamp, pair, "Low model confidence")
+
+    def _close_position(self,
+                        date: pd.Timestamp,
+                        pair: Tuple[str, str],
+                        reason: str = None) -> None:
+        """Close a position and record the trade."""
+        if pair in self.positions:
+            position = self.positions[pair]
+
+            trade_record = {
+                'pair': f"{position.asset1}/{position.asset2}",
+                'entry_date': position.entry_date,
+                'exit_date': date,
+                'entry_spread': position.entry_spread,
+                'quantity': position.quantity,
+                'pnl': position.peak_pnl,
+                'max_drawdown': position.current_drawdown,
+                'transaction_costs': position.transaction_costs,
+                'entry_confidence': position.entry_confidence,
+                'exit_confidence': position.model_confidence,
+                'close_reason': reason
+            }
+
+            self.trades.append(trade_record)
+            del self.positions[pair]
+
+    def save_state(self, path: str) -> None:
+        """Save strategy state and models."""
+        state_path = Path(path)
+        state_path.mkdir(parents=True, exist_ok=True)
+
+        self.spread_predictor.save_model(str(state_path / "spread_predictor.h5"))
+        self.signal_classifier.save_model(str(state_path / "signal_classifier.h5"))
+
+        np.savez(
+            state_path / "feature_scaler.npz",
+            mean=self.feature_scaler.mean_,
+            scale=self.feature_scaler.scale_
         )
 
-        fig.show()
+        state = {
+            'pairs': self.pairs,
+            'hedge_ratios': self.hedge_ratios,
+            'current_portfolio_value': self.current_portfolio_value,
+            'parameters': {
+                'sequence_length': self.sequence_length,
+                'zscore_threshold': self.zscore_threshold,
+                'min_confidence': self.min_confidence
+            }
+        }
+
+        with open(state_path / "strategy_state.json", 'w') as f:
+            json.dump(state, f)
+
+    def load_state(self, path: str) -> None:
+        """Load strategy state and models."""
+        state_path = Path(path)
+
+        self.spread_predictor.load_model(str(state_path / "spread_predictor.h5"))
+        self.signal_classifier.load_model(str(state_path / "signal_classifier.h5"))
+
+        scaler_state = np.load(state_path / "feature_scaler.npz", allow_pickle=True).item()
+        self.feature_scaler.mean_ = scaler_state['mean']
+        self.feature_scaler.scale_ = scaler_state['scale']
+
+        with open(state_path / "strategy_state.json", 'r') as f:
+            state = json.load(f)
+
+        self.pairs = state['pairs']
+        self.hedge_ratios = state['hedge_ratios']
+        self.current_portfolio_value = state['current_portfolio_value']
+
+        loaded_params = state['parameters']
+        if (loaded_params['sequence_length'] != self.sequence_length or
+            loaded_params['zscore_threshold'] != self.zscore_threshold or
+            loaded_params['min_confidence'] != self.min_confidence):
+            logger.warning("Loaded state has different parameters than current strategy")
+
+    def get_portfolio_stats(self) -> Dict:
+        """Calculate comprehensive portfolio statistics."""
+        if not self.trades:
+            return {}
+
+        trades_df = pd.DataFrame(self.trades)
+
+        stats = {
+            'total_trades': len(trades_df),
+            'winning_trades': len(trades_df[trades_df['pnl'] > 0]),
+            'total_pnl': trades_df['pnl'].sum(),
+            'total_costs': trades_df['transaction_costs'].sum(),
+            'max_drawdown': trades_df['max_drawdown'].max(),
+            'avg_trade_duration': (trades_df['exit_date'] - trades_df['entry_date']).mean().days,
+            'pairs_traded': len(trades_df['pair'].unique())
+        }
+
+        stats.update({
+            'avg_entry_confidence': trades_df['entry_confidence'].mean(),
+            'avg_exit_confidence': trades_df['exit_confidence'].mean(),
+            'confidence_correlation_pnl': trades_df['entry_confidence'].corr(trades_df['pnl'])
+        })
+
+        if len(trades_df) > 0:
+            stats['win_rate'] = stats['winning_trades'] / stats['total_trades']
+            stats['avg_profit_per_trade'] = stats['total_pnl'] / stats['total_trades']
+            stats['profit_factor'] = (
+                trades_df[trades_df['pnl'] > 0]['pnl'].sum() /
+                abs(trades_df[trades_df['pnl'] < 0]['pnl'].sum())
+                if len(trades_df[trades_df['pnl'] < 0]) > 0 else float('inf')
+            )
+
+        reason_counts = trades_df['close_reason'].value_counts()
+        for reason, count in reason_counts.items():
+            stats[f'closes_{reason.lower().replace(" ", "_")}'] = count
+
+        return stats
 
 
 def main():
-    """Example usage with proper temporal handling."""
-    import yfinance as yf
-    from datetime import datetime, timedelta
+    """Test the deep learning pairs trading strategy and generate comprehensive outputs."""
+
+    output_dir = Path("pairs_trading_strategy_DL_outputs")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    models_dir = output_dir / "models"
+    plots_dir = output_dir / "plots"
+    data_dir = output_dir / "data"
+    results_dir = output_dir / "results"
+
+    for directory in [models_dir, plots_dir, data_dir, results_dir]:
+        directory.mkdir(exist_ok=True)
 
     try:
-        logger.info("Downloading historical data...")
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=365 * 4)
+        logger.info("Reading data from local CSV files...")
+        raw_data = DATA_DIR.replace(r'\config', '')
+        raw_data_dir = Path(f"{raw_data}/raw")
 
-        stock1_symbol = "AAPL"
-        stock2_symbol = "MSFT"
+        selected_symbols = [
+            'AAPL',
+            'MSFT',
+            'NVDA',
+            'AMD',
+            'INTC',
+            'QCOM',
+            'AVGO',
+            'ASML',
+            'AMAT',
+            'MU'
+        ]
 
-        stock1_data = yf.download(stock1_symbol, start=start_date, end=end_date)
-        stock2_data = yf.download(stock2_symbol, start=start_date, end=end_date)
+        logger.info(f"Selected stocks for analysis: {', '.join(selected_symbols)}")
 
-        stock1_prices = stock1_data['Close']
-        stock2_prices = stock2_data['Close']
+        prices = pd.DataFrame()
+        for symbol in selected_symbols:
+            try:
+                csv_path = raw_data_dir / f"{symbol}.csv"
+                if not csv_path.exists():
+                    logger.warning(f"Data file not found for {symbol}")
+                    continue
 
-        logger.info("Initializing model...")
-        model = PairsTradingDL(
+                df = pd.read_csv(csv_path)
+                if 'Date' not in df.columns or 'Adj_Close' not in df.columns:
+                    logger.warning(f"Required columns missing in {symbol}")
+                    continue
+
+                df['Date'] = pd.to_datetime(df['Date'])
+                df.set_index('Date', inplace=True)
+                prices[symbol] = df['Adj_Close']
+                logger.debug(f"Successfully loaded data for {symbol}")
+            except Exception as e:
+                logger.error(f"Error reading data for {symbol}: {str(e)}")
+                continue
+
+        if prices.empty:
+            raise ValueError("No valid price data loaded")
+
+        prices = prices.ffill().bfill()
+        prices.to_csv(data_dir / "price_data.csv")
+        logger.info(f"Successfully loaded data for {len(prices.columns)} symbols")
+
+        strategy = PairsTradingDL(
             sequence_length=20,
             prediction_horizon=1,
             zscore_threshold=2.0,
-            train_size=252,
-            validation_size=63
+            min_confidence=0.6,
+            max_position_size=0.1,
+            stop_loss=0.02,
+            take_profit=0.04,
+            max_drawdown=0.2,
+            max_pairs=5,
+            model_dir=models_dir
         )
 
-        logger.info("Preparing feature_engineering...")
-        features = model.prepare_pair_data(
-            stock1_prices,
-            stock2_prices,
-            start_idx=20
-        )
+        logger.info("Initializing deep learning models and finding pairs...")
+        pairs = strategy.find_trading_pairs(prices)
+        if not pairs:
+            logger.warning("No valid trading pairs found")
+            return None
 
-        features = model.generate_labels(features, forward_looking=True)
+        pair_analysis = []
+        for pair in pairs:
+            asset1, asset2 = pair
+            pair_data = strategy.prepare_pair_data(
+                prices[asset1],
+                prices[asset2]
+            )
+            predictions = strategy.predict_signals(pair_data)
 
-        logger.info("Starting walk-forward validation...")
-        results = model.walk_forward_validation(features)
-
-        logger.info("Plotting results...")
-        model.plot_walk_forward_results(
-            results,
-            stock1_prices - stock2_prices
-        )
-
-        logger.info("\nValidation Results:")
-        for i, result in enumerate(results, 1):
-            val_start, val_end = result['val_period']
-            metrics = {
-                'spread_predictor': result['models_data']['spread_predictor']['metrics'],
-                'signal_classifier': result['models_data']['signal_classifier']['metrics']
+            analysis = {
+                'pair': f"{asset1}/{asset2}",
+                'hedge_ratio': strategy.hedge_ratios[pair],
+                'avg_confidence': predictions['signal_probability'].mean(),
+                'signal_ratio': (predictions['predicted_signal'] != 0).mean(),
+                'avg_spread': pair_data['spread'].mean(),
+                'spread_vol': pair_data['spread_vol'].mean(),
+                'correlation': pair_data['rolling_corr'].mean()
             }
+            pair_analysis.append(analysis)
 
-            print(f"\nPeriod {i}: {val_start.date()} to {val_end.date()}")
-            print("Spread Predictor Metrics:")
-            for metric, value in metrics['spread_predictor'].items():
-                print(f"  {metric}: {value:.4f}")
+        pd.DataFrame(pair_analysis).to_csv(results_dir / "pair_analysis.csv")
 
-            print("Signal Classifier Metrics:")
-            for metric, value in metrics['signal_classifier'].items():
-                print(f"  {metric}: {value:.4f}")
+        logger.info("Generating trading signals...")
+        signals = strategy.generate_signals(prices)
+        signals.to_csv(results_dir / "trading_signals.csv")
+
+        logger.info("Creating visualizations...")
+        for pair in pairs:
+            asset1, asset2 = pair
+            pair_data = strategy.prepare_pair_data(prices[asset1], prices[asset2])
+            predictions = strategy.predict_signals(pair_data)
+
+            fig = make_subplots(
+                rows=4, cols=1,
+                subplot_titles=[
+                    f'Price Movement: {asset1} vs {asset2}',
+                    'Spread with Predictions',
+                    'Model Confidence',
+                    'Trading Signals'
+                ],
+                vertical_spacing=0.1
+            )
+
+            fig.add_trace(
+                go.Scatter(x=prices.index, y=prices[asset1], name=asset1),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=prices.index, y=prices[asset2], name=asset2),
+                row=1, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=pair_data.index,
+                    y=pair_data['spread'],
+                    name='Actual Spread'
+                ),
+                row=2, col=1
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=predictions.index,
+                    y=predictions['spread_prediction'],
+                    name='Predicted Spread',
+                    line=dict(dash='dash')
+                ),
+                row=2, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=predictions.index,
+                    y=predictions['signal_probability'],
+                    name='Model Confidence',
+                    line=dict(color='purple')
+                ),
+                row=3, col=1
+            )
+            fig.add_hline(
+                y=strategy.min_confidence,
+                line_dash="dash",
+                line_color="red",
+                annotation_text="Min Confidence",
+                row=3, col=1
+            )
+
+            long_signals = signals[pair] > 0
+            short_signals = signals[pair] < 0
+
+            if long_signals.any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=signals.index[long_signals],
+                        y=pair_data.loc[signals.index[long_signals], 'spread'],
+                        mode='markers',
+                        marker=dict(color='green', size=10),
+                        name='Long Signal'
+                    ),
+                    row=4, col=1
+                )
+
+            if short_signals.any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=signals.index[short_signals],
+                        y=pair_data.loc[signals.index[short_signals], 'spread'],
+                        mode='markers',
+                        marker=dict(color='red', size=10),
+                        name='Short Signal'
+                    ),
+                    row=4, col=1
+                )
+
+            fig.update_layout(
+                height=1600,
+                title_text=f"Deep Learning Analysis: {asset1}/{asset2}",
+                showlegend=True
+            )
+
+            fig.write_html(plots_dir / f"dl_analysis_{asset1}_{asset2}.html")
+
+        strategy_config = {
+            'sequence_length': strategy.sequence_length,
+            'prediction_horizon': strategy.prediction_horizon,
+            'zscore_threshold': strategy.zscore_threshold,
+            'min_confidence': strategy.min_confidence,
+            'max_position_size': strategy.max_position_size,
+            'stop_loss': strategy.stop_loss,
+            'take_profit': strategy.take_profit,
+            'max_pairs': strategy.max_pairs
+        }
+
+        with open(results_dir / "strategy_config.json", 'w') as f:
+            json.dump(strategy_config, f, indent=4)
+
+        with open(results_dir / "analysis_summary.txt", 'w') as f:
+            f.write("Deep Learning Pairs Trading Analysis Summary\n")
+            f.write("=========================================\n\n")
+
+            f.write(f"Analysis Period: {prices.index[0].date()} to {prices.index[-1].date()}\n")
+            f.write(f"Number of assets analyzed: {len(prices.columns)}\n")
+            f.write(f"Number of trading pairs found: {len(pairs)}\n\n")
+
+            f.write("Trading Pairs:\n")
+            for pair_info in pair_analysis:
+                f.write(f"\n{pair_info['pair']}:\n")
+                f.write(f"  Hedge Ratio: {pair_info['hedge_ratio']:.4f}\n")
+                f.write(f"  Average Confidence: {pair_info['avg_confidence']:.4f}\n")
+                f.write(f"  Signal Ratio: {pair_info['signal_ratio']:.4f}\n")
+                f.write(f"  Correlation: {pair_info['correlation']:.4f}\n")
+                f.write(f"  Average Spread: {pair_info['avg_spread']:.4f}\n")
+                f.write(f"  Spread Volatility: {pair_info['spread_vol']:.4f}\n")
+
+        strategy.save_state(str(models_dir / "final_state"))
+
+        logger.info(f"Analysis complete. Results saved to {output_dir}")
 
         return {
-            'feature_engineering': features,
-            'results': results,
-            'model': model,
-            'stock1_data': stock1_data,
-            'stock2_data': stock2_data
+            'strategy': strategy,
+            'signals': signals,
+            'prices': prices,
+            'pair_analysis': pair_analysis
         }
 
     except Exception as e:
@@ -460,6 +933,6 @@ def main():
 if __name__ == "__main__":
     results = main()
     if results is not None:
-        print("\nExecution completed successfully!")
+        print("\nDeep Learning Pairs Trading analysis completed successfully!")
     else:
-        print("\nExecution failed. Check logs for details.")
+        print("\nAnalysis failed. Check logs for details.")

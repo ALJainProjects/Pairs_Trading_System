@@ -3,12 +3,13 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
 from typing import Dict, List, Tuple
+from statsmodels.tsa.stattools import coint
 
 from src.analysis.correlation_analysis import CorrelationAnalyzer
-from src.models.statistical import StatisticalModel
+from src.analysis.cointegration import find_cointegrated_pairs, calculate_half_life
 from src.analysis.clustering_analysis import AssetClusteringAnalyzer
+from src.models.statistical import StatisticalModel
 from src.utils.visualization import PlotlyVisualizer
 
 
@@ -17,7 +18,7 @@ class EnhancedPairAnalyzer:
 
     def __init__(self):
         self.correlation_analyzer = None
-        self.cointegration_analyzer = StatisticalModel()
+        self.cointegration_analyzer = None
         self.clustering_analyzer = AssetClusteringAnalyzer()
         self.visualizer = PlotlyVisualizer()
 
@@ -33,7 +34,6 @@ class EnhancedPairAnalyzer:
             returns = self._calculate_returns(st.session_state['historical_data'])
             self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
 
-        # Create tabs for different analysis methods
         tab1, tab2, tab3, tab4 = st.tabs([
             "Correlation Analysis",
             "Cointegration Analysis",
@@ -57,7 +57,6 @@ class EnhancedPairAnalyzer:
         """Render correlation analysis section."""
         st.subheader("Correlation Analysis")
 
-        # Parameters
         col1, col2 = st.columns(2)
         with col1:
             correlation_threshold = st.slider(
@@ -77,7 +76,7 @@ class EnhancedPairAnalyzer:
         with col2:
             correlation_method = st.selectbox(
                 "Correlation Method",
-                ["pearson", "spearman", "partial"]
+                ["pearson", "partial"]
             )
             rolling_window = st.number_input(
                 "Rolling Window (days)",
@@ -89,31 +88,34 @@ class EnhancedPairAnalyzer:
         if st.button("Run Correlation Analysis"):
             try:
                 with st.spinner("Running correlation analysis..."):
-                    # Get returns data
                     returns = self._calculate_returns(st.session_state['historical_data'])
 
-                    # Run analysis
-                    corr_matrix = self.correlation_analyzer.calculate_correlation_matrix(
-                        returns,
-                        method=correlation_method,
-                        min_periods=lookback
-                    )
+                    returns = returns.tail(lookback)
 
-                    # Get highly correlated pairs
+                    self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
+
+                    if correlation_method == 'pearson':
+                        corr_matrix = self.correlation_analyzer.calculate_pearson_correlation()
+                    else:
+                        corr_matrix = self.correlation_analyzer.calculate_partial_correlation()
+
                     pairs = self.correlation_analyzer.get_highly_correlated_pairs(
                         correlation_type=correlation_method,
                         threshold=correlation_threshold,
                         absolute=True
                     )
 
-                    # Store results
+                    rolling_corrs = self.correlation_analyzer.calculate_rolling_correlation(
+                        window=rolling_window
+                    )
+
                     st.session_state['correlation_results'] = {
                         'matrix': corr_matrix,
-                        'pairs': pairs
+                        'pairs': pairs,
+                        'rolling': rolling_corrs
                     }
 
-                    # Display results
-                    self._display_correlation_results(corr_matrix, pairs, returns)
+                    self._display_correlation_results(corr_matrix, pairs, returns, rolling_corrs)
 
             except Exception as e:
                 st.error(f"Error in correlation analysis: {str(e)}")
@@ -122,7 +124,6 @@ class EnhancedPairAnalyzer:
         """Render cointegration analysis section."""
         st.subheader("Cointegration Analysis")
 
-        # Parameters
         col1, col2 = st.columns(2)
         with col1:
             significance_level = st.slider(
@@ -156,22 +157,19 @@ class EnhancedPairAnalyzer:
         if st.button("Run Cointegration Analysis"):
             try:
                 with st.spinner("Running cointegration analysis..."):
-                    # Get price data
                     prices = self._get_price_data(st.session_state['historical_data'])
 
-                    # Run analysis
-                    cointegrated_pairs = self.cointegration_analyzer.find_cointegrated_pairs(
+                    cointegrated_pairs = find_cointegrated_pairs(
                         prices=prices,
                         significance_level=significance_level,
+                        lookback_period=31,
                         max_pairs=max_pairs,
                         min_half_life=min_half_life,
                         max_half_life=max_half_life
                     )
 
-                    # Store results
                     st.session_state['cointegration_results'] = cointegrated_pairs
 
-                    # Display results
                     self._display_cointegration_results(cointegrated_pairs, prices)
 
             except Exception as e:
@@ -181,7 +179,6 @@ class EnhancedPairAnalyzer:
         """Render clustering analysis section."""
         st.subheader("Clustering Analysis")
 
-        # Parameters
         col1, col2 = st.columns(2)
         with col1:
             clustering_method = st.selectbox(
@@ -213,10 +210,8 @@ class EnhancedPairAnalyzer:
         if st.button("Run Clustering Analysis"):
             try:
                 with st.spinner("Running clustering analysis..."):
-                    # Get returns data
                     returns = self._calculate_returns(st.session_state['historical_data'])
 
-                    # Run clustering
                     if clustering_method == "kmeans":
                         clusters = self.clustering_analyzer.kmeans_clustering(
                             returns,
@@ -233,17 +228,15 @@ class EnhancedPairAnalyzer:
                             returns,
                             n_clusters=n_clusters
                         )
-                    else:  # graph
+                    else:
                         clusters = self.clustering_analyzer.graph_based_clustering(
                             returns.corr(),
                             threshold=similarity_threshold,
                             min_cluster_size=min_cluster_size
                         )
 
-                    # Store results
                     st.session_state['clustering_results'] = clusters
 
-                    # Display results
                     self._display_clustering_results(clusters, returns)
 
             except Exception as e:
@@ -253,7 +246,6 @@ class EnhancedPairAnalyzer:
         """Render selected pairs section."""
         st.subheader("Selected Trading Pairs")
 
-        # Get pairs from different methods
         correlation_pairs = set(
             self._get_pairs_from_correlation()
             if 'correlation_results' in st.session_state else set()
@@ -267,19 +259,16 @@ class EnhancedPairAnalyzer:
             if 'clustering_results' in st.session_state else set()
         )
 
-        # Find pairs that appear in multiple methods
         intersection = correlation_pairs.intersection(cointegration_pairs)
         if clustering_pairs:
             intersection = intersection.intersection(clustering_pairs)
 
-        # Display Venn diagram of overlap
         self._plot_pair_overlap(
             correlation_pairs,
             cointegration_pairs,
             clustering_pairs
         )
 
-        # Allow manual selection/deselection
         st.subheader("Pair Selection")
         selected_pairs = st.multiselect(
             "Select pairs for trading",
@@ -289,7 +278,6 @@ class EnhancedPairAnalyzer:
 
         if st.button("Confirm Selected Pairs"):
             if selected_pairs:
-                # Store in session state
                 st.session_state['selected_pairs'] = pd.DataFrame({
                     'Pair': selected_pairs
                 })
@@ -318,27 +306,113 @@ class EnhancedPairAnalyzer:
     def _display_correlation_results(self,
                                      corr_matrix: pd.DataFrame,
                                      pairs: pd.DataFrame,
-                                     returns: pd.DataFrame):
+                                     returns: pd.DataFrame,
+                                     rolling_corrs: Dict[str, pd.Series]):
         """Display correlation analysis results."""
-        # Plot correlation heatmap
-        fig = self.visualizer.plot_correlation_matrix(
-            corr_matrix,
-            title="Asset Correlation Matrix"
-        )
-        st.plotly_chart(fig)
-
-        # Show top pairs
-        st.subheader("Top Correlated Pairs")
-        st.dataframe(pairs)
-
-        # Allow detailed pair analysis
-        if len(pairs) > 0:
-            pair = st.selectbox(
-                "Select pair for detailed analysis",
-                pairs['Pair'].tolist()
+        try:
+            fig = self.correlation_analyzer.plot_correlation_matrix(
+                correlation_type='pearson' if 'pearson' in str(type(corr_matrix)) else 'partial'
             )
-            if pair:
-                self._display_pair_details(pair, returns)
+            st.plotly_chart(fig)
+
+            st.subheader("Top Correlated Pairs")
+            if len(pairs) > 0:
+                display_pairs = pairs.copy()
+                if 'correlation' in display_pairs.columns:
+                    display_pairs['correlation'] = display_pairs['correlation'].round(4)
+                st.dataframe(display_pairs)
+            else:
+                st.warning("No pairs found above the correlation threshold.")
+
+            try:
+                stability = self.correlation_analyzer.analyze_correlation_stability()
+                st.subheader("Correlation Stability Analysis")
+                st.dataframe(stability.round(4))
+            except Exception as e:
+                st.warning(f"Could not calculate correlation stability: {str(e)}")
+
+            if len(pairs) > 0:
+                selected_pair = st.selectbox(
+                    "Select pair for detailed analysis",
+                    [(row['asset1'], row['asset2']) for _, row in pairs.iterrows()]
+                )
+
+                if selected_pair:
+                    with st.spinner("Generating pair analysis..."):
+                        self._display_pair_details(selected_pair, returns, rolling_corrs)
+
+                    try:
+                        stability_fig = self._analyze_pair_stability(selected_pair, returns)
+                        st.plotly_chart(stability_fig)
+                    except Exception as e:
+                        st.warning(f"Could not generate stability analysis: {str(e)}")
+
+        except Exception as e:
+            st.error(f"Error displaying correlation results: {str(e)}")
+
+    def _display_pair_details(self,
+                              pair: Tuple[str, str],
+                              returns: pd.DataFrame,
+                              rolling_corrs: Dict[str, pd.Series]):
+        """Display detailed analysis for a selected pair."""
+        try:
+            ticker1, ticker2 = pair
+            pair_name = self.correlation_analyzer._validate_pair_name(ticker1, ticker2)
+
+            fig = make_subplots(
+                rows=2, cols=1,
+                subplot_titles=["Returns", "Rolling Correlation"],
+                vertical_spacing=0.15
+            )
+
+            for ticker, name in [(ticker1, "Asset 1"), (ticker2, "Asset 2")]:
+                if ticker in returns.columns:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=returns.index,
+                            y=returns[ticker],
+                            name=f"{ticker} Returns",
+                            mode='lines'
+                        ),
+                        row=1, col=1
+                    )
+                else:
+                    st.warning(f"No return data found for {ticker}")
+
+            if rolling_corrs and pair_name in rolling_corrs:
+                roll_corr = rolling_corrs[pair_name]
+                fig.add_trace(
+                    go.Scatter(
+                        x=roll_corr.index,
+                        y=roll_corr,
+                        name="Rolling Correlation",
+                        mode='lines'
+                    ),
+                    row=2, col=1
+                )
+            else:
+                st.info("No rolling correlation data available for this pair")
+
+            fig.update_layout(
+                height=800,
+                title=f"Pair Analysis: {ticker1} - {ticker2}",
+                showlegend=True,
+                yaxis2_range=[-1, 1]
+            )
+
+            st.plotly_chart(fig)
+
+            if ticker1 in returns.columns and ticker2 in returns.columns:
+                stats = {
+                    "Full Period Correlation": returns[ticker1].corr(returns[ticker2]),
+                    "Recent Correlation (63d)": returns[ticker1].tail(63).corr(returns[ticker2].tail(63)),
+                    "Correlation Stability": returns[ticker1].rolling(63).corr(returns[ticker2]).std()
+                }
+                st.write("### Correlation Statistics")
+                st.write(pd.Series(stats).round(4))
+
+        except Exception as e:
+            st.error(f"Error displaying pair details: {str(e)}")
 
     def _display_cointegration_results(self,
                                        cointegrated_pairs: List[Dict],
@@ -348,11 +422,9 @@ class EnhancedPairAnalyzer:
             st.warning("No cointegrated pairs found.")
             return
 
-        # Convert to DataFrame for display
         pairs_df = pd.DataFrame(cointegrated_pairs)
         st.dataframe(pairs_df)
 
-        # Allow detailed spread analysis
         pair = st.selectbox(
             "Select pair for spread analysis",
             [(p['stock1'], p['stock2']) for p in cointegrated_pairs]
@@ -364,11 +436,9 @@ class EnhancedPairAnalyzer:
                                     clusters: List[List[str]],
                                     returns: pd.DataFrame):
         """Display clustering analysis results."""
-        # Display clusters
         for i, cluster in enumerate(clusters, 1):
             st.write(f"Cluster {i}: {', '.join(cluster)}")
 
-        # Plot cluster visualization
         fig = self.clustering_analyzer.plot_cluster_heatmap(
             returns.corr(),
             clusters,
@@ -376,62 +446,15 @@ class EnhancedPairAnalyzer:
         )
         st.plotly_chart(fig)
 
-    def _display_pair_details(self, pair: Tuple[str, str], returns: pd.DataFrame):
-        """Display detailed analysis for a selected pair."""
-        ticker1, ticker2 = pair
-
-        # Create subplots
-        fig = make_subplots(
-            rows=2, cols=1,
-            subplot_titles=["Returns", "Rolling Correlation"]
-        )
-
-        # Plot returns
-        fig.add_trace(
-            go.Scatter(
-                x=returns.index,
-                y=returns[ticker1],
-                name=f"{ticker1} Returns",
-                mode='lines'
-            ),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=returns.index,
-                y=returns[ticker2],
-                name=f"{ticker2} Returns",
-                mode='lines'
-            ),
-            row=1, col=1
-        )
-
-        # Plot rolling correlation
-        roll_corr = returns[ticker1].rolling(window=63).corr(returns[ticker2])
-        fig.add_trace(
-            go.Scatter(
-                x=returns.index,
-                y=roll_corr,
-                name="Rolling Correlation",
-                mode='lines'
-            ),
-            row=2, col=1
-        )
-
-        fig.update_layout(height=800)
-        st.plotly_chart(fig)
-
     def _display_spread_analysis(self, pair: Tuple[str, str], prices: pd.DataFrame):
         """Display spread analysis for a cointegrated pair."""
         ticker1, ticker2 = pair
 
-        # Calculate spread
-        spread = self.cointegration_analyzer.calculate_spread(
+        spread = StatisticalModel().calculate_spread(
             prices[ticker1],
             prices[ticker2]
         )
 
-        # Plot spread
         fig = go.Figure()
         fig.add_trace(
             go.Scatter(
@@ -442,7 +465,6 @@ class EnhancedPairAnalyzer:
             )
         )
 
-        # Add mean and standard deviation bands
         mean = spread.mean()
         std = spread.std()
         fig.add_hline(y=mean, line_dash="dash", line_color="gray")
@@ -462,26 +484,21 @@ class EnhancedPairAnalyzer:
         """Plot Venn diagram of pair overlap in a Streamlit app."""
         from matplotlib_venn import venn3
         import matplotlib.pyplot as plt
-        import streamlit as st
 
-        # Ensure the input sets are valid
         if not (isinstance(correlation_pairs, set) and
                 isinstance(cointegration_pairs, set) and
                 isinstance(clustering_pairs, set)):
             st.error("All input arguments must be sets.")
             return
 
-        # Create the Venn diagram
         fig, ax = plt.subplots(figsize=(10, 10))
         venn3(
-            subsets=[correlation_pairs, cointegration_pairs, clustering_pairs],
+            subsets=(correlation_pairs, cointegration_pairs, clustering_pairs),
             set_labels=('Correlation', 'Cointegration', 'Clustering')
         )
 
-        # Add a title to the plot
         plt.title("Venn Diagram of Pair Overlap")
 
-        # Display the plot in Streamlit
         st.pyplot(fig)
 
     def _get_pairs_from_correlation(self) -> set:
@@ -490,7 +507,10 @@ class EnhancedPairAnalyzer:
             return set()
 
         pairs = st.session_state['correlation_results']['pairs']
-        return set(tuple(sorted(p)) for p in pairs['Pair'])
+        return set(
+            tuple(sorted([row['asset1'], row['asset2']]))
+            for _, row in pairs.iterrows()
+        )
 
     def _get_pairs_from_cointegration(self) -> set:
         """Extract pairs from cointegration results."""
@@ -511,7 +531,6 @@ class EnhancedPairAnalyzer:
         clusters = st.session_state['clustering_results']
         pairs = set()
         for cluster in clusters:
-            # Create pairs from assets in same cluster
             for i, asset1 in enumerate(cluster):
                 for asset2 in cluster[i + 1:]:
                     pairs.add(tuple(sorted([asset1, asset2])))
@@ -522,31 +541,37 @@ class EnhancedPairAnalyzer:
         if not pairs:
             return
 
-        # Calculate comprehensive metrics for each pair
         pair_metrics = []
         returns = self._calculate_returns(st.session_state['historical_data'])
         prices = self._get_price_data(st.session_state['historical_data'])
+
+        def _single_coint_test(asset1: pd.Series,
+                               asset2: pd.Series) -> float:
+            """Perform single cointegration test."""
+            try:
+                _, p_val, _ = coint(asset1, asset2)
+                return p_val
+            except:
+                return 1.0
 
         for pair in pairs:
             ticker1, ticker2 = pair
             metrics = {
                 'pair': pair,
                 'correlation': returns[ticker1].corr(returns[ticker2]),
-                'cointegration_pval': self.cointegration_analyzer._single_coint_test(
+                'cointegration_pval':_single_coint_test(
                     prices[ticker1],
                     prices[ticker2]
                 ),
-                'half_life': self.cointegration_analyzer.calculate_half_life(
+                'half_life': calculate_half_life(
                     prices[ticker1] - prices[ticker2]
                 )
             }
             pair_metrics.append(metrics)
 
-        # Create DataFrame and store
         metrics_df = pd.DataFrame(pair_metrics)
         st.session_state['pair_metrics'] = metrics_df
 
-        # Save pairs in standardized format
         st.session_state['selected_pairs'] = pd.DataFrame({
             'Pair': pairs,
             'Asset1': [p[0] for p in pairs],
@@ -557,15 +582,12 @@ class EnhancedPairAnalyzer:
         """Analyze the stability of a trading pair over time."""
         ticker1, ticker2 = pair
 
-        # Calculate rolling metrics
-        window_sizes = [21, 63, 126]  # 1m, 3m, 6m
+        window_sizes = [21, 63, 126]
         rolling_metrics = {}
 
         for window in window_sizes:
-            # Rolling correlation
             roll_corr = returns[ticker1].rolling(window=window).corr(returns[ticker2])
 
-            # Rolling beta
             roll_beta = (
                     returns[[ticker1, ticker2]]
                     .rolling(window=window)
@@ -581,7 +603,6 @@ class EnhancedPairAnalyzer:
                 'beta': roll_beta
             }
 
-        # Plot rolling metrics
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -591,7 +612,6 @@ class EnhancedPairAnalyzer:
 
         colors = ['blue', 'green', 'red']
         for (period, metrics), color in zip(rolling_metrics.items(), colors):
-            # Correlation plot
             fig.add_trace(
                 go.Scatter(
                     x=returns.index,
@@ -603,7 +623,6 @@ class EnhancedPairAnalyzer:
                 col=1
             )
 
-            # Beta plot
             fig.add_trace(
                 go.Scatter(
                     x=returns.index,
@@ -630,8 +649,7 @@ class EnhancedPairAnalyzer:
         """Analyze historical profitability of a pair."""
         ticker1, ticker2 = pair
 
-        # Calculate spread and z-score
-        spread = self.cointegration_analyzer.calculate_spread(
+        spread = StatisticalModel().calculate_spread(
             prices[ticker1],
             prices[ticker2]
         )
@@ -639,22 +657,20 @@ class EnhancedPairAnalyzer:
         z_score = (spread - spread.rolling(window=21).mean()) / \
                   spread.rolling(window=21).std()
 
-        # Simulate basic signals
         long_entry = z_score < -2.0
         short_entry = z_score > 2.0
         exit_signal = abs(z_score) < 0.5
 
-        # Calculate strategy returns
         strategy_returns = pd.Series(0, index=returns.index)
         position = 0
 
         for i in range(1, len(returns)):
-            if position == 0:  # No position
+            if position == 0:
                 if long_entry.iloc[i]:
                     position = 1
                 elif short_entry.iloc[i]:
                     position = -1
-            else:  # In position
+            else:
                 if exit_signal.iloc[i]:
                     position = 0
 
@@ -662,7 +678,6 @@ class EnhancedPairAnalyzer:
                     returns[ticker1].iloc[i] - returns[ticker2].iloc[i]
             )
 
-        # Calculate metrics
         metrics = {
             'Total Return': (1 + strategy_returns).prod() - 1,
             'Annual Return': (1 + strategy_returns).prod() ** (252 / len(returns)) - 1,
@@ -680,19 +695,15 @@ class EnhancedPairAnalyzer:
         """Analyze risks associated with a pair."""
         ticker1, ticker2 = pair
 
-        # Calculate various risk metrics
         pair_returns = returns[ticker1] - returns[ticker2]
 
-        # Value at Risk
         var_95 = np.percentile(pair_returns, 5)
         var_99 = np.percentile(pair_returns, 1)
 
-        # Expected Shortfall
         es_95 = pair_returns[pair_returns <= var_95].mean()
         es_99 = pair_returns[pair_returns <= var_99].mean()
 
-        # Tail correlation with market
-        market_returns = returns.mean(axis=1)  # simple proxy
+        market_returns = returns.mean(axis=1)
         tail_mask = market_returns < np.percentile(market_returns, 5)
         tail_corr = pair_returns[tail_mask].corr(market_returns[tail_mask])
 

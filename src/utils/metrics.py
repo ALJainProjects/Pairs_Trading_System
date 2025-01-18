@@ -23,7 +23,6 @@ def calculate_sharpe_ratio(equity_curve: pd.Series, risk_free_rate: float = 0.0)
         logger.warning("Standard deviation is 0. Returning 0.0 for Sharpe Ratio.")
         return 0.0
 
-    # Subtract daily risk-free portion
     excess = daily_returns - (risk_free_rate / 252.0)
     sr = excess.mean() / ret_std * np.sqrt(252)
     return sr
@@ -72,7 +71,6 @@ def calculate_max_drawdown(equity_curve: pd.Series) -> float:
         return 0.0
     cummax = equity_curve.cummax()
     drawdowns = (equity_curve - cummax) / cummax
-    # Typically drawdowns are negative, so max drawdown is the minimum. If no drawdown, min is 0 or above.
     mdd = drawdowns.min()
     return float(mdd if mdd < 0 else 0.0)
 
@@ -88,12 +86,11 @@ def calculate_calmar_ratio(equity_curve: pd.Series, risk_free_rate: float = 0.0)
         float: Calmar ratio, or NaN if drawdown is 0 or equity_curve is too short.
     """
     logger.info("Calculating Calmar Ratio.")
-    mdd = calculate_max_drawdown(equity_curve)  # negative or 0
+    mdd = calculate_max_drawdown(equity_curve)
     if mdd == 0:
         logger.warning("No drawdown => returning NaN for Calmar.")
         return np.nan
 
-    # Estimate annualized return via simple start/end approach
     if len(equity_curve) < 2:
         logger.warning("Equity curve too short for Calmar. Returning NaN.")
         return np.nan
@@ -124,10 +121,8 @@ def calculate_beta(equity_curve: pd.Series, market_returns: pd.Series) -> float:
     """
     logger.info("Calculating Portfolio Beta.")
 
-    # Calculate portfolio returns
     portfolio_returns = equity_curve.pct_change().dropna()
 
-    # Ensure the series are aligned and have sufficient data
     common_index = portfolio_returns.index.intersection(market_returns.index)
     if len(common_index) < 2:
         logger.warning("Insufficient overlapping data points to calculate beta. Returning 0.0")
@@ -136,7 +131,6 @@ def calculate_beta(equity_curve: pd.Series, market_returns: pd.Series) -> float:
     portfolio_returns = portfolio_returns[common_index]
     market_returns = market_returns[common_index]
 
-    # Calculate beta using covariance and variance
     market_var = market_returns.var()
     if market_var == 0:
         logger.warning("Market variance is zero. Cannot calculate beta. Returning 0.0")
@@ -166,10 +160,8 @@ def calculate_alpha(equity_curve: pd.Series,
     """
     logger.info("Calculating Portfolio Alpha.")
 
-    # Calculate portfolio returns
     portfolio_returns = equity_curve.pct_change().dropna()
 
-    # Ensure the series are aligned and have sufficient data
     common_index = portfolio_returns.index.intersection(market_returns.index)
     if len(common_index) < 2:
         logger.warning("Insufficient overlapping data points to calculate alpha. Returning 0.0")
@@ -178,23 +170,18 @@ def calculate_alpha(equity_curve: pd.Series,
     portfolio_returns = portfolio_returns[common_index]
     market_returns = market_returns[common_index]
 
-    # Calculate daily risk-free rate
     daily_rf = risk_free_rate / 252.0
 
-    # Calculate beta
     beta = calculate_beta(equity_curve, market_returns)
     if beta == 0.0:
         logger.warning("Beta calculation failed. Cannot calculate alpha. Returning 0.0")
         return 0.0
 
-    # Calculate alpha using CAPM
-    # Alpha = Realized Return - (Risk Free Rate + Beta * (Market Return - Risk Free Rate))
     portfolio_avg_return = portfolio_returns.mean()
     market_avg_return = market_returns.mean()
 
     alpha_daily = portfolio_avg_return - (daily_rf + beta * (market_avg_return - daily_rf))
 
-    # Annualize alpha
     alpha_annual = alpha_daily * 252
 
     return alpha_annual

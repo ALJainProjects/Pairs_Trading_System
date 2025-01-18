@@ -80,7 +80,7 @@ class DataDownloader:
                                  symbols: List[str],
                                  start_date: Union[str, datetime, pd.Timestamp] = None,
                                  end_date: Union[str, datetime, pd.Timestamp] = None,
-                                 years_back: int = None) -> None:
+                                 years_back: int = None) -> pd.DataFrame:
         """
         Download historical data for individual symbols and save to separate CSV files.
 
@@ -105,16 +105,27 @@ class DataDownloader:
         logger.info(f"Downloading data from {start_date.date()} to {end_date.date()}")
 
         failed_symbols = []
+        all_data = []
 
         for symbol in tqdm(symbols, desc="Downloading data"):
             try:
-                self._download_symbol(symbol, start_date, end_date)
+                symbol_data = self._download_symbol(symbol, start_date, end_date)
+                all_data.append(symbol_data)
             except Exception as e:
                 logger.error(f"Failed to download {symbol}: {str(e)}")
                 failed_symbols.append(symbol)
 
         if failed_symbols:
             logger.warning(f"Failed to download data for {len(failed_symbols)} symbols: {', '.join(failed_symbols)}")
+
+        combined_df = pd.concat(all_data, ignore_index=True)
+
+        required_columns = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Adj_Close', 'Volume']
+        for col in required_columns:
+            if col not in combined_df.columns:
+                combined_df[col] = None
+
+        return combined_df
 
     def _download_symbol(self,
                          symbol: str,
@@ -161,6 +172,8 @@ class DataDownloader:
 
         filename = f"{symbol}.csv"
         df.to_csv(os.path.join(RAW_DATA_DIR.replace(r'\config', ''), filename), index=False)
+
+        return df
 
 
 def main():

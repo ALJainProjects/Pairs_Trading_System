@@ -1,152 +1,173 @@
 """
-Enhanced Backtesting Module with Multi-Pair Support
-
-Features:
-1. Multiple pair trading support
-2. Position tracking per pair
-3. Enhanced risk management for portfolio level metrics
-4. Transaction cost handling per leg
+Enhanced Backtesting Module with Advanced Analytics and Risk Management
 """
 
-from typing import Dict, List, Optional, Tuple, Union, Any
-import pandas as pd
+from typing import Dict, Optional, Tuple, Any, Union
 import numpy as np
-from pandas import DataFrame
-
-from src.strategy.risk import PairRiskManager
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from config.logging_config import logger
+import os
+import json
 
-class MultiPairBacktester:
-    """Enhanced backtester with support for multiple pairs."""
-
+class MultiPairBackTester:
+    """Enhanced backtester with advanced analytics and risk management"""
     def __init__(
-            self,
-            strategy: Any,
-            returns: pd.DataFrame,
-            initial_capital: float = 100000,
-            risk_manager: Optional[PairRiskManager] = None,
-            transaction_cost: float = 0.001,
-            max_pairs: Optional[int] = None
+        self,
+        strategy: Any,
+        returns: pd.DataFrame,
+        initial_capital: float = 100000,
+        risk_manager: Optional[Any] = None,
+        transaction_cost: float = 0.001,
+        max_pairs: Optional[int] = None,
+        feature_engineer: Optional[Any] = None,
+        cointegration_threshold: float = 0.05,
+        min_liquidity_threshold: float = 100000
     ):
-        """
-        Initialize the backtester.
-
-        Args:
-            strategy: Trading strategy instance
-            returns: DataFrame of asset returns
-            initial_capital: Starting capital
-            risk_manager: Risk manager instance
-            transaction_cost: Transaction cost per trade
-            max_pairs: Maximum concurrent pairs to trade
-        """
         self.strategy = strategy
         self.returns = returns
         self.initial_capital = initial_capital
-        self.risk_manager = risk_manager or PairRiskManager()
+        self.risk_manager = risk_manager
         self.transaction_cost = transaction_cost
         self.max_pairs = max_pairs
+        self.feature_engineer = feature_engineer
+        self.cointegration_threshold = cointegration_threshold
+        self.min_liquidity_threshold = min_liquidity_threshold
 
         self.equity_curve = pd.Series(dtype=float)
         self.current_capital = initial_capital
         self.active_pairs = {}
-
         self.pair_performance = {}
+        self.trade_history = pd.DataFrame()
+        self.cointegration_history = {}
+        self.feature_history = {}
+
+        self._initialize_components()
+
+    def _initialize_components(self):
+        """Initialize strategy components"""
         self.trade_history = pd.DataFrame(
-            columns=['Date', 'Pair', 'Action', 'Quantity', 'Price', 'Cost']
+            columns=[
+                'Date', 'Pair', 'Action', 'Quantity', 'Price1', 'Price2',
+                'Cost', 'Model_Confidence', 'Cointegration_Score',
+                'Spread_Zscore', 'Feature_Values'
+            ]
         )
 
-        self.asset_prices = self._initialize_asset_prices()
-
-    def _initialize_asset_prices(self) -> pd.DataFrame:
-        """Initialize asset prices from returns."""
-        logger.info("Initializing asset prices")
-
-        return self.returns
-
-    def _validate_pair_trade(self, pair: Tuple[str, str],
-                            quantity: float) -> bool:
-        """
-        Validate if a pair trade is allowable.
-
-        Args:
-            pair: Tuple of (asset1, asset2)
-            quantity: Trade quantity
-
-        Returns:
-            bool: Whether trade is valid
-        """
-        if self.max_pairs and len(self.active_pairs) >= self.max_pairs:
-            if pair not in self.active_pairs:
-                logger.warning(f"Max pairs ({self.max_pairs}) reached")
-                return False
-
-        required_capital = self._calculate_required_capital(pair, quantity)
-        if required_capital > self.current_capital:
-            logger.warning(f"Insufficient capital for {pair}")
-            return False
-
-        return True
-
-    def _calculate_required_capital(self, pair: Tuple[str, str],
-                                  quantity: float) -> float:
-        """Calculate required capital for a pair trade."""
-        asset1, asset2 = pair
-        price1 = self.asset_prices[asset1].iloc[-1]
-        price2 = self.asset_prices[asset2].iloc[-1]
-
-        trade_value = (price1 + price2) * quantity
-        costs = trade_value * self.transaction_cost
-
-        return trade_value + costs
+        if self.feature_engineer is None:
+            from src.data.feature_engineering import FeatureEngineer
+            self.feature_engineer = FeatureEngineer()
 
     def run_backtest(self) -> pd.Series:
-        """
-        Execute the backtest.
-
-        Returns:
-            Series of portfolio values
-        """
-        logger.info("Starting backtest")
+        """Execute enhanced backtest with feature engineering and monitoring"""
+        logger.info("Starting backtest with enhanced monitoring")
         self.equity_curve = pd.Series(index=self.returns.index, dtype=float)
         portfolio_value = self.initial_capital
 
         self.equity_curve.iloc[0] = portfolio_value
+        features_cache = {}
 
         for i, current_date in enumerate(self.returns.index[1:], 1):
-            historical_data = self.returns.iloc[:i + 1]
+            try:
+                historical_data = self.returns.iloc[:i + 1]
+                if i % 20 == 0:
+                    features = self._prepare_features(historical_data)
+                    features_cache = features
+                else:
+                    features = features_cache
 
-            if hasattr(self.strategy, 'predict_signals'):
-                features = self.strategy.prepare_features(historical_data)
-                predictions = self.strategy.predict_signals(features)
-                signals = predictions.loc[current_date:current_date]
-            else:
-                signals = self.strategy.generate_signals(historical_data)
+                signals = (
+                    self.strategy.predict_signals(features)
+                    if hasattr(self.strategy, 'predict_signals')
+                    else self.strategy.generate_signals(historical_data)
+                )
 
-            portfolio_value = self._process_signals_and_update(
-                signals,
-                portfolio_value,
-                current_date
-            )
+                portfolio_value = self._process_signals_and_update(
+                    signals,
+                    portfolio_value,
+                    current_date,
+                    features
+                )
 
-            self.equity_curve.loc[current_date] = portfolio_value
+                self.equity_curve.loc[current_date] = portfolio_value
 
-            if self._check_risk_constraints(current_date):
-                logger.warning("Risk constraints violated")
-                break
+                if self.risk_manager and self.risk_manager.check_risk_limits(
+                    self.equity_curve,
+                    self.active_pairs,
+                    self.returns.loc[current_date].to_dict()
+                )[0]:
+                    logger.warning(f"Risk limits exceeded at {current_date}")
+                    break
+
+            except Exception as e:
+                logger.error(f"Error in backtest at {current_date}: {str(e)}")
+                continue
 
         logger.info("Backtest completed")
         return self.equity_curve
 
-    def _process_signals_and_update(self,
-                                    signals: pd.DataFrame,
-                                    portfolio_value: float,
-                                    current_date: pd.Timestamp) -> float:
-        """Process signals and update portfolio."""
-        current_prices = self.asset_prices.loc[current_date]
+    def _prepare_features(self, prices: pd.DataFrame) -> pd.DataFrame:
+        """Prepare features using feature engineering"""
+        try:
+            features = self.feature_engineer.generate_features(prices)
+            return features
+        except Exception as e:
+            logger.error(f"Feature engineering failed: {str(e)}")
+            return prices
 
-        if isinstance(signals, pd.DataFrame) and 'predicted_signal' in signals.columns:
+    def _process_signals_and_update(
+            self,
+            signals: Union[pd.DataFrame, Dict[Tuple[str, str], pd.Series]],
+            portfolio_value: float,
+            current_date: pd.Timestamp,
+            features: pd.DataFrame
+    ) -> float:
+        """
+        Process signals with enhanced monitoring and updates.
+
+        Args:
+            signals: Either DataFrame with pair columns or Dict mapping pairs to signal Series
+            portfolio_value: Current portfolio value
+            current_date: Current timestamp
+            features: Feature DataFrame
+
+        Returns:
+            float: Updated portfolio value
+        """
+        current_prices = self.returns.loc[current_date]
+
+        if isinstance(signals, pd.DataFrame) and not 'predicted_signal' in signals.columns:
+            for pair in signals.columns:
+                if isinstance(pair, tuple) and len(pair) == 2:
+                    asset1, asset2 = pair
+                    if asset1 not in current_prices or asset2 not in current_prices:
+                        continue
+
+                    signal_value = float(signals[pair].loc[current_date])
+
+                    confidence = 1.0
+                    if isinstance(features, pd.DataFrame) and 'confidence' in features.columns:
+                        confidence = float(features['confidence'].iloc[-1])
+
+                    if self.risk_manager:
+                        self.risk_manager.update_risk_metrics(
+                            pair,
+                            self.returns,
+                            self.active_pairs,
+                            confidence
+                        )
+
+                    portfolio_value = self._process_pair_signal(
+                        pair,
+                        signal_value,
+                        portfolio_value,
+                        current_date,
+                        confidence,
+                        features
+                    )
+
+        elif isinstance(signals, pd.DataFrame) and 'predicted_signal' in signals.columns:
             for pair in self.strategy.pairs:
                 if isinstance(pair, tuple) and len(pair) == 2:
                     asset1, asset2 = pair
@@ -156,12 +177,25 @@ class MultiPairBacktester:
                     pair_signals = signals[signals['Pair'] == f"{asset1}/{asset2}"]
                     if not pair_signals.empty:
                         signal_value = float(pair_signals.iloc[-1]['predicted_signal'])
+                        confidence = float(pair_signals.iloc[-1].get('confidence', 1.0))
+
+                        if self.risk_manager:
+                            self.risk_manager.update_risk_metrics(
+                                pair,
+                                self.returns,
+                                self.active_pairs,
+                                confidence
+                            )
+
                         portfolio_value = self._process_pair_signal(
                             pair,
                             signal_value,
                             portfolio_value,
-                            current_date
+                            current_date,
+                            confidence,
+                            features
                         )
+
         else:
             for pair, signal_row in signals.items():
                 if isinstance(pair, tuple) and len(pair) == 2:
@@ -170,446 +204,604 @@ class MultiPairBacktester:
                         continue
 
                     signal_value = float(signal_row.loc[current_date])
+                    confidence = 1.0
+
+                    if self.risk_manager:
+                        self.risk_manager.update_risk_metrics(
+                            pair,
+                            self.returns,
+                            self.active_pairs,
+                            confidence
+                        )
+
                     portfolio_value = self._process_pair_signal(
                         pair,
                         signal_value,
                         portfolio_value,
-                        current_date
+                        current_date,
+                        confidence,
+                        features
                     )
-
-        portfolio_value = self._update_active_positions(
-            portfolio_value,
-            current_date
-        )
 
         return portfolio_value
 
-    def _process_pair_signal(self,
-                           pair: Tuple[str, str],
-                           signal: float,
-                           portfolio_value: float,
-                           current_date: pd.Timestamp) -> float:
-        """Process signal for a single pair."""
-        asset1, asset2 = pair
-
+    def _process_pair_signal(
+        self,
+        pair: Tuple[str, str],
+        signal: float,
+        portfolio_value: float,
+        current_date: pd.Timestamp,
+        confidence: float,
+        features: pd.DataFrame
+    ) -> float:
+        """Process signal for a single pair"""
         if pair in self.active_pairs:
             existing_signal = self.active_pairs[pair]['signal']
             if signal == 0 or (signal * existing_signal < 0):
-                portfolio_value = self._close_pair_position(
+                portfolio_value = self._close_position(
                     pair,
                     portfolio_value,
-                    current_date
+                    current_date,
+                    "Signal change"
                 )
 
         if signal != 0 and pair not in self.active_pairs:
-            quantity = self._calculate_position_size(
-                pair,
-                portfolio_value
+            if self.risk_manager and confidence < self.risk_manager.min_model_confidence:
+                return portfolio_value
+
+            quantity = (
+                self.risk_manager.calculate_position_size(
+                    portfolio_value,
+                    pair,
+                    self.returns,
+                    confidence,
+                    self.returns.corr()
+                )
+                if self.risk_manager
+                else portfolio_value * self.strategy.max_position_size
             )
 
-            if self._validate_pair_trade(pair, quantity):
-                portfolio_value = self._open_pair_position(
+            if self._validate_pair_trade(pair, quantity, current_date):
+                portfolio_value = self._open_position(
                     pair,
                     signal,
                     quantity,
                     portfolio_value,
-                    current_date
+                    current_date,
+                    confidence,
+                    features
                 )
 
         return portfolio_value
 
-    def _calculate_position_size(self,
-                               pair: Tuple[str, str],
-                               portfolio_value: float) -> float:
-        """Calculate position size for a pair."""
+    def _validate_pair_trade(
+        self,
+        pair: Tuple[str, str],
+        quantity: float,
+        current_date: pd.Timestamp
+    ) -> bool:
+        """Validate if a pair trade meets all requirements"""
+        if not quantity > 0:
+            return False
+
+        if self.max_pairs and len(self.active_pairs) >= self.max_pairs:
+            return False
+
         asset1, asset2 = pair
-        price1 = self.asset_prices[asset1].iloc[-1]
-        price2 = self.asset_prices[asset2].iloc[-1]
+        return asset1 in self.returns.columns and asset2 in self.returns.columns
 
-        if hasattr(self.risk_manager, 'calculate_position_size'):
-            return self.risk_manager.calculate_position_size(
-                portfolio_value,
-                price1 + price2,
-                self.transaction_cost
-            )
-
-        risk_per_trade = 0.01
-        return (portfolio_value * risk_per_trade) / (price1 + price2)
-
-    def _open_pair_position(self,
-                          pair: Tuple[str, str],
-                          signal: float,
-                          quantity: float,
-                          portfolio_value: float,
-                          current_date: pd.Timestamp) -> float:
-        """Open a new pair position."""
+    def _open_position(
+        self,
+        pair: Tuple[str, str],
+        signal: float,
+        quantity: float,
+        portfolio_value: float,
+        current_date: pd.Timestamp,
+        confidence: float,
+        features: pd.DataFrame
+    ) -> float:
+        """Open new position"""
         asset1, asset2 = pair
-        price1 = self.asset_prices[asset1].loc[current_date]
-        price2 = self.asset_prices[asset2].loc[current_date]
+        price1 = self.returns[asset1].loc[current_date]
+        price2 = self.returns[asset2].loc[current_date]
 
-        trade_value = (price1 + price2) * quantity
-        costs = trade_value * self.transaction_cost
-
-        for asset, price in [(asset1, price1), (asset2, price2)]:
-            self.trade_history = pd.concat([
-                self.trade_history,
-                pd.DataFrame([{
-                    'Date': current_date,
-                    'Pair': f"{asset1}/{asset2}",
-                    'Asset': asset,
-                    'Action': 'BUY' if signal > 0 else 'SELL',
-                    'Quantity': quantity * signal,
-                    'Price': price,
-                    'Cost': costs / 2
-                }])
-            ], ignore_index=True)
+        trade_value = quantity * (price1 + price2)
+        total_cost = trade_value * self.transaction_cost
 
         self.active_pairs[pair] = {
             'signal': signal,
             'quantity': quantity,
             'entry_date': current_date,
-            'entry_prices': (price1, price2)
+            'entry_prices': (price1, price2),
+            'confidence': confidence,
+            'features': features.iloc[-1].to_dict() if not features.empty else {},
+            'transaction_costs': total_cost
         }
 
-        return portfolio_value - costs
+        if not features.empty:
+            for feature, value in features.iloc[-1].items():
+                if feature not in self.feature_history:
+                    self.feature_history[feature] = []
+                self.feature_history[feature].append(float(value))
 
-    def _close_pair_position(self,
-                           pair: Tuple[str, str],
-                           portfolio_value: float,
-                           current_date: pd.Timestamp) -> float:
-        """Close an existing pair position."""
+        self.trade_history = pd.concat([
+            self.trade_history,
+            pd.DataFrame([{
+                'Date': current_date,
+                'Pair': f"{asset1}/{asset2}",
+                'Action': 'ENTRY',
+                'Quantity': quantity * signal,
+                'Price1': price1,
+                'Price2': price2,
+                'Cost': total_cost,
+                'Model_Confidence': confidence,
+                'Feature_Values': str(features.iloc[-1].to_dict() if not features.empty else {})
+            }])
+        ], ignore_index=True)
+
+        return portfolio_value - total_cost
+
+    def _close_position(
+        self,
+        pair: Tuple[str, str],
+        portfolio_value: float,
+        current_date: pd.Timestamp,
+        reason: str = None
+    ) -> float:
+        """Close position"""
         if pair not in self.active_pairs:
             return portfolio_value
 
-        asset1, asset2 = pair
         position = self.active_pairs[pair]
-
-        price1 = self.asset_prices[asset1].loc[current_date]
-        price2 = self.asset_prices[asset2].loc[current_date]
+        asset1, asset2 = pair
 
         entry_price1, entry_price2 = position['entry_prices']
-        signal = position['signal']
-        quantity = position['quantity']
+        current_price1 = self.returns[asset1].loc[current_date]
+        current_price2 = self.returns[asset2].loc[current_date]
 
-        pnl = signal * quantity * (
-            (price1 - entry_price1) - (price2 - entry_price2)
+        entry_spread = entry_price1 - entry_price2
+        exit_spread = current_price1 - current_price2
+        spread_pnl = position['quantity'] * position['signal'] * (
+            exit_spread - entry_spread
         )
 
-        close_value = (price1 + price2) * quantity
-        costs = close_value * self.transaction_cost
+        exit_value = position['quantity'] * (current_price1 + current_price2)
+        exit_cost = exit_value * self.transaction_cost
+        total_pnl = spread_pnl - position['transaction_costs'] - exit_cost
 
-        for asset, price in [(asset1, price1), (asset2, price2)]:
-            self.trade_history = pd.concat([
-                self.trade_history,
-                pd.DataFrame([{
-                    'Date': current_date,
-                    'Pair': f"{asset1}/{asset2}",
-                    'Asset': asset,
-                    'Action': 'SELL' if signal > 0 else 'BUY',
-                    'Quantity': -quantity * signal,
-                    'Price': price,
-                    'Cost': costs / 2
-                }])
-            ], ignore_index=True)
+        self.trade_history = pd.concat([
+            self.trade_history,
+            pd.DataFrame([{
+                'Date': current_date,
+                'Pair': f"{asset1}/{asset2}",
+                'Action': 'EXIT',
+                'Reason': reason,
+                'Quantity': -position['quantity'] * position['signal'],
+                'Price1': current_price1,
+                'Price2': current_price2,
+                'Cost': exit_cost,
+                'PnL': total_pnl,
+                'Model_Confidence': position['confidence']
+            }])
+        ], ignore_index=True)
 
-        self.pair_performance[pair] = self.pair_performance.get(pair, [])
+        if pair not in self.pair_performance:
+            self.pair_performance[pair] = []
+
         self.pair_performance[pair].append({
             'Entry_Date': position['entry_date'],
             'Exit_Date': current_date,
-            'PnL': pnl,
-            'Return': pnl / (close_value - costs)
+            'Holding_Period': (current_date - position['entry_date']).days,
+            'PnL': total_pnl,
+            'Return': total_pnl / exit_value,
+            'Model_Confidence': position['confidence'],
+            'Exit_Reason': reason
         })
 
         del self.active_pairs[pair]
-
-        return portfolio_value + pnl - costs
-
-    def _update_active_positions(self,
-                               portfolio_value: float,
-                               current_date: pd.Timestamp) -> float:
-        """Update all active positions."""
-        if not self.active_pairs:
-            return portfolio_value
-
-        total_pnl = 0
-        for pair in list(self.active_pairs.keys()):
-            asset1, asset2 = pair
-            position = self.active_pairs[pair]
-
-            if (asset1 not in self.asset_prices.columns or
-                asset2 not in self.asset_prices.columns):
-                logger.warning(f"Assets for pair {pair} no longer available")
-                portfolio_value = self._close_pair_position(
-                    pair,
-                    portfolio_value,
-                    current_date
-                )
-                continue
-
-            price1 = self.asset_prices[asset1].loc[current_date]
-            price2 = self.asset_prices[asset2].loc[current_date]
-            entry_price1, entry_price2 = position['entry_prices']
-
-            pair_pnl = position['signal'] * position['quantity'] * (
-                (price1 - entry_price1) - (price2 - entry_price2)
-            )
-            total_pnl += pair_pnl
-
         return portfolio_value + total_pnl
 
-    def _check_risk_constraints(self, current_date: pd.Timestamp) -> bool:
-        """Check if risk constraints are violated."""
-        current_equity = self.equity_curve.loc[:current_date]
+    def generate_report(self, output_file: Optional[str] = None) -> Dict:
+        """Generate comprehensive backtest report"""
+        metrics = self._calculate_performance_metrics()
 
-        if hasattr(self.risk_manager, 'check_drawdown'):
-            if self.risk_manager.check_drawdown(current_equity):
-                return True
+        report = {
+            'Overall_Metrics': metrics,
+            'Pair_Performance': self._analyze_pair_performance(),
+            'Risk_Analysis': self._analyze_risk_metrics()
+        }
 
-        if hasattr(self.risk_manager, 'check_portfolio_risk'):
-            positions = pd.DataFrame([
-                {
-                    'Pair': f"{p[0]}/{p[1]}",
-                    'Signal': v['signal'],
-                    'Quantity': v['quantity']
-                }
-                for p, v in self.active_pairs.items()
-            ])
-            if self.risk_manager.check_portfolio_risk(current_equity, positions):
-                return True
+        if output_file:
+            self._save_report(report, output_file)
 
-        return False
+        return report
 
-    def calculate_performance_metrics(self) -> Dict[str, float]:
-        """Calculate comprehensive performance metrics."""
-        logger.info("Calculating performance metrics")
-
+    def _calculate_performance_metrics(self) -> Dict:
+        """Calculate key performance metrics"""
         returns = self.equity_curve.pct_change().dropna()
 
-        if len(returns) == 0:
-            logger.warning("No returns available")
-            return self._empty_metrics()
-
-        total_return = (self.equity_curve.iloc[-1] / self.initial_capital) - 1
-        annual_return = ((1 + total_return) ** (252 / len(returns))) - 1
-
-        volatility = returns.std() * np.sqrt(252)
-        sharpe_ratio = (annual_return / volatility) if volatility != 0 else 0
-        max_drawdown = self._calculate_max_drawdown()
-
-        pair_metrics = self._calculate_pair_metrics()
-
-        metrics = {
-            'Total Return': total_return,
-            'Annual Return': annual_return,
-            'Volatility': volatility,
-            'Sharpe Ratio': sharpe_ratio,
-            'Max Drawdown': max_drawdown,
-            'Pair Metrics': pair_metrics
-        }
-
-        return metrics
-
-    def _empty_metrics(self) -> Dict[str, Union[float, Dict]]:
-        """Return empty metrics structure."""
         return {
-            'Total Return': 0.0,
-            'Annual Return': 0.0,
-            'Volatility': 0.0,
-            'Sharpe Ratio': 0.0,
-            'Max Drawdown': 0.0,
-            'Pair Metrics': {}
+            'Total_Return': (self.equity_curve.iloc[-1] / self.equity_curve.iloc[0] - 1),
+            'Annual_Return': returns.mean() * 252,
+            'Annual_Volatility': returns.std() * np.sqrt(252),
+            'Sharpe_Ratio': (returns.mean() / returns.std()) * np.sqrt(252),
+            'Max_Drawdown': self.risk_manager.calculate_drawdown(self.equity_curve) if self.risk_manager else None,
+            'Win_Rate': len([t for t in self.trade_history['PnL'] if t > 0]) / len(self.trade_history) if len(self.trade_history) > 0 else 0
         }
 
-    def _calculate_max_drawdown(self) -> float:
-        """Calculate maximum drawdown."""
-        peaks = self.equity_curve.expanding().max()
-        drawdowns = (self.equity_curve - peaks) / peaks
-        return abs(drawdowns.min())
-
-    def _calculate_pair_metrics(self) -> Dict[str, Dict]:
-        """Calculate performance metrics for each pair."""
-        pair_metrics = {}
+    def _analyze_pair_performance(self) -> Dict[str, Dict[str, float]]:
+        """Analyze performance metrics for each pair"""
+        pair_analysis = {}
 
         for pair, trades in self.pair_performance.items():
             if not trades:
                 continue
 
             trades_df = pd.DataFrame(trades)
-
-            total_pnl = trades_df['PnL'].sum()
-            avg_return = trades_df['Return'].mean()
-            win_rate = (trades_df['PnL'] > 0).mean()
-
-            holding_periods = (trades_df['Exit_Date'] -
-                             trades_df['Entry_Date']).mean().days
-
-            pair_metrics[f"{pair[0]}/{pair[1]}"] = {
-                'Total PnL': total_pnl,
-                'Average Return': avg_return,
-                'Win Rate': win_rate,
-                'Number of Trades': len(trades),
-                'Average Holding Period': holding_periods
+            pair_analysis[f"{pair[0]}/{pair[1]}"] = {
+                'Total_PnL': trades_df['PnL'].sum(),
+                'Number_of_Trades': len(trades),
+                'Win_Rate': (trades_df['PnL'] > 0).mean(),
+                'Average_Return': trades_df['Return'].mean(),
+                'Average_Holding_Period': trades_df['Holding_Period'].mean(),
+                'Average_Confidence': trades_df['Model_Confidence'].mean()
             }
 
-        return pair_metrics
+        return pair_analysis
 
-    def plot_results(self, show_drawdown: bool = True,
-                    show_pair_returns: bool = True) -> None:
-        """
-        Plot comprehensive backtest results.
+    def _analyze_risk_metrics(self) -> Dict:
+        """Get risk metrics from risk manager"""
+        if not self.risk_manager:
+            return {}
 
-        Args:
-            show_drawdown: Whether to show drawdown subplot
-            show_pair_returns: Whether to show individual pair returns
-        """
-        n_rows = 1 + int(show_drawdown) + int(show_pair_returns)
+        return {
+            pair: metrics.__dict__
+            for pair, metrics in self.risk_manager.risk_metrics.items()
+        }
+
+    def _save_report(self, report: Dict, output_file: str) -> None:
+        """Save backtest report to file"""
+        try:
+            output_dir = os.path.dirname(output_file)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            with open(output_file, 'w') as f:
+                json.dump(report, f, indent=4, default=str)
+
+            logger.info(f"Report saved successfully to {output_file}")
+
+        except Exception as e:
+            logger.error(f"Error saving report: {str(e)}")
+            raise
+
+
+class BacktestVisualizer:
+    """Component for generating interactive backtest visualizations"""
+
+    def plot_all_analysis(self, backtest) -> None:
+        """Generate all analysis plots"""
+        logger.info("Generating comprehensive analysis plots")
+
+        self.plot_performance(backtest)
+        for pair in backtest.pair_performance:
+            self.plot_pair_analysis(backtest, pair)
+        if backtest.risk_manager:
+            backtest.risk_manager.plot_risk_metrics()
+        self.plot_trading_metrics(backtest)
+
+    def plot_performance(self, backtest, show_trades: bool = True) -> None:
+        """Plot trading performance metrics"""
         fig = make_subplots(
-            rows=n_rows,
+            rows=3,
             cols=1,
             shared_xaxes=True,
             vertical_spacing=0.05,
-            subplot_titles=self._get_subplot_titles(
-                show_drawdown,
-                show_pair_returns
-            )
+            subplot_titles=(
+                'Equity Curve with Trade Points',
+                'Rolling Returns & Volatility',
+                'Trade Analysis'
+            ),
+            row_heights=[0.5, 0.25, 0.25]
         )
 
         fig.add_trace(
             go.Scatter(
-                x=self.equity_curve.index,
-                y=self.equity_curve.values,
-                mode='lines',
+                x=backtest.equity_curve.index,
+                y=backtest.equity_curve.values,
                 name='Portfolio Value',
                 line=dict(color='blue')
             ),
             row=1, col=1
         )
 
-        if show_drawdown:
-            drawdown = (self.equity_curve - self.equity_curve.cummax()) / \
-                       self.equity_curve.cummax()
+        if show_trades and not backtest.trade_history.empty:
+            entries = backtest.trade_history[backtest.trade_history['Action'] == 'ENTRY']
             fig.add_trace(
                 go.Scatter(
-                    x=drawdown.index,
-                    y=drawdown.values,
-                    mode='lines',
+                    x=entries['Date'],
+                    y=[backtest.equity_curve[date] for date in entries['Date']],
+                    mode='markers',
+                    name='Trade Entry',
+                    marker=dict(color='green', symbol='triangle-up', size=10),
+                    text=[f"Pair: {p}<br>Size: {q}<br>Conf: {c}"
+                          for p, q, c in zip(entries['Pair'], entries['Quantity'],
+                                             entries['Model_Confidence'])],
+                    hoverinfo='text'
+                ),
+                row=1, col=1
+            )
+
+            exits = backtest.trade_history[backtest.trade_history['Action'] == 'EXIT']
+            fig.add_trace(
+                go.Scatter(
+                    x=exits['Date'],
+                    y=[backtest.equity_curve[date] for date in exits['Date']],
+                    mode='markers',
+                    name='Trade Exit',
+                    marker=dict(color='red', symbol='triangle-down', size=10),
+                    text=[f"Pair: {p}<br>PnL: {pnl:.2f}<br>Reason: {r}"
+                          for p, pnl, r in zip(exits['Pair'], exits['PnL'], exits['Reason'])],
+                    hoverinfo='text'
+                ),
+                row=1, col=1
+            )
+
+            if backtest.risk_manager:
+                drawdown = pd.Series(index=backtest.equity_curve.index)
+                for date in backtest.equity_curve.index:
+                    drawdown[date] = backtest.risk_manager.calculate_drawdown(
+                        backtest.equity_curve[:date])
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=drawdown.index,
+                        y=drawdown.values * 100,
+                        name='Drawdown %',
+                        fill='tozeroy',
+                        line=dict(color='red')
+                    ),
+                    row=1, col=1
+                )
+
+        returns = backtest.equity_curve.pct_change()
+        rolling_returns = returns.rolling(window=20).mean() * 252 * 100
+        rolling_vol = returns.rolling(window=20).std() * np.sqrt(252) * 100
+
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_returns.index,
+                y=rolling_returns.values,
+                name='Rolling Returns (Ann.)',
+                line=dict(color='green')
+            ),
+            row=2, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_vol.index,
+                y=rolling_vol.values,
+                name='Rolling Vol (Ann.)',
+                line=dict(color='orange')
+            ),
+            row=2, col=1
+        )
+
+        if not backtest.trade_history.empty:
+            trade_pnls = backtest.trade_history[
+                backtest.trade_history['Action'] == 'EXIT']['PnL']
+            fig.add_trace(
+                go.Bar(
+                    x=trade_pnls.index,
+                    y=trade_pnls.values,
+                    name='Trade PnL',
+                    marker=dict(
+                        color=['green' if x > 0 else 'red' for x in trade_pnls]
+                    )
+                ),
+                row=3, col=1
+            )
+
+        fig.update_layout(
+            height=900,
+            title_text='Trading Performance Analysis',
+            showlegend=True
+        )
+
+        fig.update_yaxes(title_text="Portfolio Value", row=1, col=1)
+        fig.update_yaxes(title_text="Percentage", row=2, col=1)
+        fig.update_yaxes(title_text="PnL", row=3, col=1)
+        fig.update_xaxes(title_text="Date", row=3, col=1)
+
+        fig.show()
+
+    def plot_pair_analysis(self, backtest, pair: Optional[Tuple[str, str]] = None) -> None:
+        """Plot pair-specific trading analysis"""
+        if pair and pair not in backtest.pair_performance:
+            logger.warning(f"No data available for pair {pair}")
+            return
+
+        pairs_to_analyze = [pair] if pair else list(backtest.pair_performance.keys())
+
+        for current_pair in pairs_to_analyze:
+            trades = pd.DataFrame(backtest.pair_performance[current_pair])
+            if trades.empty:
+                continue
+
+            fig = make_subplots(
+                rows=2,
+                cols=2,
+                subplot_titles=(
+                    'Cumulative PnL',
+                    'Trade Size vs Returns',
+                    'Trade Duration Analysis',
+                    'Monthly Performance'
+                )
+            )
+
+            cumulative_pnl = trades['PnL'].cumsum()
+            peak = cumulative_pnl.expanding().max()
+            drawdown = (cumulative_pnl - peak) / peak * 100
+
+            fig.add_trace(
+                go.Scatter(
+                    x=trades['Exit_Date'],
+                    y=cumulative_pnl,
+                    name='Cumulative PnL'
+                ),
+                row=1, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=trades['Exit_Date'],
+                    y=drawdown,
                     name='Drawdown',
+                    fill='tozeroy',
                     line=dict(color='red')
+                ),
+                row=1, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=trades['Quantity'].abs(),
+                    y=trades['Return'],
+                    mode='markers',
+                    name='Size vs Returns',
+                    marker=dict(
+                        color=trades['PnL'],
+                        colorscale='RdYlGn',
+                        showscale=True
+                    )
+                ),
+                row=1, col=2
+            )
+
+            fig.add_trace(
+                go.Box(
+                    y=trades['Holding_Period'],
+                    name='Holding Period',
+                    boxpoints='all',
+                    jitter=0.3,
+                    pointpos=-1.8
                 ),
                 row=2, col=1
             )
 
-        if show_pair_returns and self.pair_performance:
-            row = 2 + int(show_drawdown)
-            self._add_pair_returns_plot(fig, row)
+            monthly_stats = trades.set_index('Exit_Date').resample('M').agg({
+                'PnL': ['sum', 'count', lambda x: (x > 0).mean() * 100]
+            })
 
-        fig.update_layout(
-            title="Backtest Results",
-            height=300 * n_rows,
-            showlegend=True,
-            template="plotly_white"
-        )
-
-        fig.update_yaxes(title_text="Portfolio Value", row=1, col=1)
-        if show_drawdown:
-            fig.update_yaxes(title_text="Drawdown", row=2, col=1)
-        if show_pair_returns:
-            fig.update_yaxes(
-                title_text="Cumulative Return",
-                row=2 + int(show_drawdown),
-                col=1
+            fig.add_trace(
+                go.Bar(
+                    x=monthly_stats.index,
+                    y=monthly_stats['PnL']['sum'],
+                    name='Monthly PnL'
+                ),
+                row=2, col=2
             )
-
-        fig.show()
-
-    def _get_subplot_titles(self, show_drawdown: bool,
-                           show_pair_returns: bool) -> List[str]:
-        """Get subplot titles based on what's being shown."""
-        titles = ["Portfolio Equity Curve"]
-        if show_drawdown:
-            titles.append("Portfolio Drawdown")
-        if show_pair_returns:
-            titles.append("Individual Pair Returns")
-        return titles
-
-    def _add_pair_returns_plot(self, fig: go.Figure, row: int) -> None:
-        """Add individual pair returns to the plot."""
-        for pair, trades in self.pair_performance.items():
-            if not trades:
-                continue
-
-            trades_df = pd.DataFrame(trades)
-
-            cum_returns = (1 + trades_df['Return']).cumprod()
 
             fig.add_trace(
                 go.Scatter(
-                    x=trades_df['Exit_Date'],
-                    y=cum_returns,
-                    mode='lines',
-                    name=f"{pair[0]}/{pair[1]}",
+                    x=monthly_stats.index,
+                    y=monthly_stats['PnL']['<lambda_0>'],
+                    name='Win Rate %',
+                    yaxis='y2',
+                    line=dict(color='green')
                 ),
-                row=row, col=1
+                row=2, col=2
             )
 
-    def generate_report(self, output_file: Optional[str] = None) -> dict[str, DataFrame | Any]:
-        """
-        Generate comprehensive backtest report.
+            fig.update_layout(
+                height=800,
+                title_text=f'Trading Analysis: {current_pair[0]}/{current_pair[1]}',
+                showlegend=True,
+            )
 
-        Args:
-            output_file: Optional file path to save report
+            fig.update_layout(
+                yaxis4=dict(
+                    title='Win Rate %',
+                    overlaying='y3',
+                    side='right',
+                    range=[0, 100]
+                )
+            )
 
-        Returns:
-            DataFrame containing all metrics
-        """
-        metrics = self.calculate_performance_metrics()
+            fig.show()
 
-        basic_metrics = pd.DataFrame({
-            'Metric': [
-                'Total Return',
-                'Annual Return',
-                'Volatility',
-                'Sharpe Ratio',
-                'Max Drawdown'
-            ],
-            'Value': [
-                f"{metrics['Total Return']:.2%}",
-                f"{metrics['Annual Return']:.2%}",
-                f"{metrics['Volatility']:.2%}",
-                f"{metrics['Sharpe Ratio']:.2f}",
-                f"{metrics['Max Drawdown']:.2%}"
-            ]
+    def plot_trading_metrics(self, backtest) -> None:
+        """Plot trading-specific metrics analysis"""
+        if backtest.trade_history.empty:
+            logger.warning("No trade history available for analysis")
+            return
+
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            subplot_titles=(
+                'Trade Size Distribution',
+                'Duration vs PnL',
+                'Win Rate by Month',
+                'Trading Activity'
+            )
+        )
+
+        trade_sizes = backtest.trade_history[
+            backtest.trade_history['Action'] == 'ENTRY']['Quantity'].abs()
+        fig.add_trace(
+            go.Histogram(
+                x=trade_sizes,
+                name='Trade Sizes',
+                nbinsx=30
+            ),
+            row=1, col=1
+        )
+
+        exits = backtest.trade_history[backtest.trade_history['Action'] == 'EXIT']
+        fig.add_trace(
+            go.Scatter(
+                x=exits['Holding_Period'],
+                y=exits['PnL'],
+                mode='markers',
+                name='Duration vs PnL',
+                marker=dict(
+                    color=exits['Model_Confidence'],
+                    colorscale='Viridis',
+                    showscale=True
+                )
+            ),
+            row=1, col=2
+        )
+
+        monthly_trades = exits.set_index('Date').resample('M').agg({
+            'PnL': lambda x: (x > 0).mean() * 100
         })
 
-        pair_metrics_list = []
-        for pair, pair_metrics in metrics['Pair Metrics'].items():
-            metrics_dict = {'Pair': pair}
-            metrics_dict.update(pair_metrics)
-            pair_metrics_list.append(metrics_dict)
+        fig.add_trace(
+            go.Scatter(
+                x=monthly_trades.index,
+                y=monthly_trades['PnL'],
+                name='Monthly Win Rate %'
+            ),
+            row=2, col=1
+        )
 
-        pair_metrics_df = pd.DataFrame(pair_metrics_list)
+        trade_counts = exits.set_index('Date').resample('M').size()
+        fig.add_trace(
+            go.Bar(
+                x=trade_counts.index,
+                y=trade_counts.values,
+                name='Monthly Trades'
+            ),
+            row=2, col=2
+        )
 
-        trade_summary = self.trade_history.groupby('Pair').agg({
-            'Date': ['count', 'min', 'max'],
-            'Cost': 'sum'
-        }).round(2)
-        trade_summary.columns = ['Number of Trades', 'First Trade',
-                               'Last Trade', 'Total Costs']
+        fig.update_layout(
+            height=800,
+            title_text='Trading Metrics Analysis',
+            showlegend=True
+        )
 
-        report = {
-            'Basic Metrics': basic_metrics,
-            'Pair Metrics': pair_metrics_df,
-            'Trade Summary': trade_summary
-        }
-
-        if output_file:
-            with pd.ExcelWriter(output_file) as writer:
-                basic_metrics.to_excel(writer, sheet_name='Basic Metrics',
-                                     index=False)
-                pair_metrics_df.to_excel(writer, sheet_name='Pair Metrics',
-                                       index=False)
-                trade_summary.to_excel(writer, sheet_name='Trade Summary')
-                self.trade_history.to_excel(writer, sheet_name='Trade History',
-                                          index=False)
-
-        return report
+        fig.show()

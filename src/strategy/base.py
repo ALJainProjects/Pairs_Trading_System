@@ -281,7 +281,8 @@ class BaseStrategy(ABC):
                       date: pd.Timestamp,
                       pair: Tuple[str, str],
                       signal: float,
-                      quantity: float) -> None:
+                      quantity: float,
+                       prices: pd.DataFrame = None) -> None:
         """Open new position with transaction costs."""
         asset1, asset2 = pair
         price1 = self.current_prices[asset1]
@@ -319,7 +320,8 @@ class BaseStrategy(ABC):
 
     def _close_position(self,
                        date: pd.Timestamp,
-                       pair: Tuple[str, str]) -> None:
+                       pair: Tuple[str, str],
+                        reason: str = None) -> None:
         """Close existing position with transaction costs."""
         if pair not in self.positions:
             return

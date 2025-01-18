@@ -429,7 +429,7 @@ def main():
 
         for symbol in symbols:
             data = yf.download(symbol, start=start_date, end=end_date)
-            prices[symbol] = data['Adj Close']
+            prices[symbol] = data['Adj_Close']
             returns[symbol] = prices[symbol].pct_change()
 
         initial_value = 100000

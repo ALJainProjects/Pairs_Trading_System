@@ -1,13 +1,10 @@
 import streamlit as st
-from typing import Dict, Optional
-import pandas as pd
-from datetime import datetime
 
 from src.data.database import DatabaseManager
 from components.data_loader import EnhancedDataLoader
 from components.pair_analyzer import EnhancedPairAnalyzer
 from components.strategy_builder import EnhancedStrategyBuilder
-from components.optimization import EnhancedOptimizationComponent
+from components.optimization import StreamlitOptimizationApp
 
 
 class PairTradingApp:
@@ -19,7 +16,7 @@ class PairTradingApp:
         self.data_loader = EnhancedDataLoader()
         self.pair_analyzer = EnhancedPairAnalyzer()
         self.strategy_builder = EnhancedStrategyBuilder()
-        self.optimization = EnhancedOptimizationComponent()
+        self.optimization = StreamlitOptimizationApp()
 
     def run(self):
         """Run the main application."""
@@ -38,7 +35,6 @@ class PairTradingApp:
     def _render_sidebar(self):
         """Render the sidebar navigation and status."""
         with st.sidebar:
-            # Navigation
             st.title("Navigation")
             page = st.radio(
                 "Select Section",
@@ -46,12 +42,10 @@ class PairTradingApp:
                 key='sidebar_main_radio'
             )
 
-            # Session state indicators
             st.markdown("---")
             st.markdown("### Session Status")
             self._display_session_status()
 
-            # Help section
             st.markdown("---")
             st.markdown("### Help")
             self._render_help_section(page)
@@ -60,7 +54,6 @@ class PairTradingApp:
 
     def _display_session_status(self):
         """Display the current session state status."""
-        # Data status
         if 'historical_data' in st.session_state:
             data = st.session_state['historical_data']
             st.success(f"✅ Data loaded: {len(data['ticker'].unique())} tickers")
@@ -68,14 +61,12 @@ class PairTradingApp:
         else:
             st.warning("❌ No data loaded")
 
-        # Pairs status
         if 'selected_pairs' in st.session_state:
             pairs = st.session_state['selected_pairs']
             st.success(f"✅ {len(pairs)} pairs selected")
         else:
             st.warning("❌ No pairs selected")
 
-        # Strategy status
         if 'backtest_results' in st.session_state:
             results = st.session_state['backtest_results']
             st.success("✅ Strategy backtested")
@@ -142,19 +133,17 @@ class PairTradingApp:
         """Render the main content based on selected page."""
         page = self._render_sidebar()
 
-        # Clear any temporary error messages
         if 'error' in st.session_state:
             del st.session_state['error']
 
-        # Render selected page
         if page == "Data Loading":
             self.data_loader.render()
         elif page == "Pair Analysis":
             self.pair_analyzer.render()
         elif page == "Strategy Builder":
             self.strategy_builder.render()
-        else:  # Optimization
-            self.optimization.render()
+        else:
+            self.optimization.run()
 
     def _check_dependencies(self, page: str) -> bool:
         """Check if required session state exists for current page."""
