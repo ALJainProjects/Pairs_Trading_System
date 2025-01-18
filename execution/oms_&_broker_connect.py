@@ -115,19 +115,15 @@ class SimulatedBroker(AbstractBroker):
         MARKET orders are filled immediately; others are stored until triggered.
         """
         try:
-            # Generate unique order ID
             self.order_counter += 1
             order.order_id = f"ORDER_{self.order_counter}"
 
-            # Validate order
             if not self._validate_order(order):
                 return False
 
-            # Immediately fill MARKET orders
             if order.order_type == OrderType.MARKET:
                 return self._execute_order(order)
 
-            # Otherwise, store for later execution (like LIMIT or STOP)
             self.orders[order.order_id] = order
             logger.info(f"Pending order placed: {order}")
             return True
@@ -169,22 +165,18 @@ class SimulatedBroker(AbstractBroker):
                 logger.error(f"Invalid order quantity {order.quantity}")
                 return False
 
-            # For non-market orders, check price
             if order.order_type != OrderType.MARKET:
                 if (order.price is None) or (order.price <= 0):
                     logger.error(f"Invalid price {order.price} for {order.order_type}")
                     return False
 
-            # If buy => check balance
             if order.side == OrderSide.BUY:
                 cost_estimate = order.quantity * (order.price or 0)
-                # Optionally add transaction cost as well
                 cost_estimate += cost_estimate * self.transaction_cost
                 if cost_estimate > self.balance:
                     logger.error("Insufficient balance to place buy order.")
                     return False
 
-            # If sell => ensure we hold enough quantity
             if order.side == OrderSide.SELL:
                 pos = self.get_position(order.symbol)
                 if not pos or pos.quantity < order.quantity:
@@ -203,23 +195,17 @@ class SimulatedBroker(AbstractBroker):
         Adjust balance and positions immediately for MARKET orders.
         """
         try:
-            # Use order.price or a best guess.
-            # For MARKET, we might not have an explicit price if no aggregator is used.
-            fill_price = order.price if order.price else 100.0  # or something default
+            fill_price = order.price if order.price else 100.0
 
             order_cost = fill_price * order.quantity
-            # Apply transaction cost
             cost_fee = order_cost * self.transaction_cost
 
             if order.side == OrderSide.BUY:
-                # reduce balance by cost + fee
                 total_spend = order_cost + cost_fee
                 self.balance -= total_spend
-                # update or create a position
                 if order.symbol in self.positions:
                     pos = self.positions[order.symbol]
                     new_qty = pos.quantity + order.quantity
-                    # Weighted average entry price
                     avg_price = (pos.entry_price * pos.quantity + order_cost) / new_qty
                     pos.quantity = new_qty
                     pos.entry_price = avg_price
@@ -232,10 +218,8 @@ class SimulatedBroker(AbstractBroker):
                     )
 
             elif order.side == OrderSide.SELL:
-                # increase balance by proceeds minus fee
                 proceeds = order_cost - cost_fee
                 self.balance += proceeds
-                # reduce or remove position
                 pos = self.positions.get(order.symbol)
                 if pos:
                     new_qty = pos.quantity - order.quantity
@@ -264,7 +248,7 @@ class LiveBroker(AbstractBroker):
         self.api_key = api_key
         self.api_secret = api_secret
         self.paper_trading = paper_trading
-        # self.client = <some actual client library init>
+        # self.client = (Some Client Library)
 
     def place_order(self, order: Order) -> bool:
         raise NotImplementedError("Implement your live broker order placement here.")
