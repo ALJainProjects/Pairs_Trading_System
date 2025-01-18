@@ -5,7 +5,7 @@ Implements a pairs trading strategy using deep learning models with full integra
 into the backtesting system, proper risk management, and optimization support.
 """
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
@@ -104,6 +104,24 @@ class PairsTradingDL(BaseStrategy):
 
         self.validate_parameters()
         self._setup_models()
+
+    @classmethod
+    def get_default_parameters(cls) -> Dict[str, Any]:
+        """
+        Return a dictionary of default parameters for PairsTradingDL.
+        """
+        return {
+            "sequence_length": 20,
+            "prediction_horizon": 1,
+            "zscore_threshold": 2.0,
+            "min_confidence": 0.6,
+            "max_position_size": 0.1,
+            "stop_loss": 0.02,
+            "take_profit": 0.04,
+            "max_drawdown": 0.2,
+            "max_pairs": 10,
+            "transaction_cost": 0.001
+        }
 
     def clear_state(self) -> None:
         """Clear strategy state between runs instead of using reset."""

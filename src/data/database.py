@@ -41,7 +41,7 @@ class DatabaseManager:
                     "High": "high",
                     "Low": "low",
                     "Close": "close",
-                    "Adj Close": "adj_close",
+                    "Adj_Close": "adj_close",
                     "Volume": "volume",
                     "Date": "date",
                 },

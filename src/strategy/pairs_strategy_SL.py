@@ -9,7 +9,7 @@ Features:
 5. Optimization support
 """
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
@@ -552,6 +552,26 @@ class EnhancedStatPairsStrategy(BaseStrategy):
 
         return fig
 
+    @classmethod
+    def get_default_parameters(cls) -> Dict[str, Any]:
+        """
+        Return a dictionary of default parameters suitable for the
+        EnhancedStatPairsStrategy.
+        """
+        return {
+            "lookback_window": 252,
+            "zscore_entry": 2.0,
+            "zscore_exit": 0.5,
+            "min_half_life": 5,
+            "max_half_life": 126,
+            "max_spread_vol": 0.1,
+            "min_correlation": 0.5,
+            "coint_threshold": 0.05,
+            "max_pairs": 10,
+            "position_size": 0.1,
+            "stop_loss": 0.02,
+            "max_drawdown": 0.2
+        }
 
 def main():
     """Test the enhanced statistical pairs trading strategy."""

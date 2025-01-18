@@ -9,7 +9,7 @@ Implements a complete machine learning based pairs trading strategy with:
 - No look-ahead bias
 """
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -105,6 +105,24 @@ class MLPairsStrategy(BaseStrategy):
         self.hedge_ratios: Dict[Tuple[str, str], float] = {}
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def get_default_parameters(cls) -> Dict[str, Any]:
+        """
+        Return a dictionary of default parameters for MLPairsStrategy.
+        """
+        return {
+            "initial_capital": 1_000_000.0,
+            "lookback_window": 20,
+            "model_confidence_threshold": 0.6,
+            "zscore_threshold": 2.0,
+            "max_position_size": 0.1,
+            "stop_loss": 0.02,
+            "take_profit": 0.04,
+            "max_drawdown": 0.2,
+            "max_pairs": 10,
+            "transaction_cost": 0.001
+        }
 
     @property
     def current_portfolio_value(self) -> float:

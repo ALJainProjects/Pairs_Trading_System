@@ -8,7 +8,8 @@ from typing import Dict, Any
 from pathlib import Path
 import json
 
-from streamlit_system.optimization_utilities.optimization_backend import OptimizationBackend
+from streamlit_system.optimization_utilities.optimization_backend import OptimizationBackend, StrategyParameters, \
+    OptimizationResult
 from streamlit_system.optimization_utilities.optimization_visualization import OptimizationVisualizer
 from streamlit_system.optimization_utilities.optimization_util import load_strategy, setup_logger
 
@@ -161,29 +162,91 @@ class StreamlitOptimizationApp:
         if st.button("Start Optimization"):
             self._run_optimization(settings)
 
+    def _convert_optimization_result(self, result: OptimizationResult) -> Dict[str, Any]:
+        """Convert backend result to frontend format."""
+        return {
+            'best_score': result.score,
+            'total_trials': result.trial_number,
+            'time_taken': result.additional_info.get('time_taken', 0),
+            'best_parameters': result.parameters,
+            'optimization_history': [{
+                'trial': i,
+                'score': r.score,
+                'params': r.parameters,
+                'metrics': r.metrics
+            } for i, r in enumerate(self.backend.results_history)],
+            'settings': self.config
+        }
+
+    def _create_parameter_set(self, param_settings: Dict) -> StrategyParameters:
+        """Convert frontend parameters to backend format."""
+        param_types = {}
+        for param, bounds in param_settings.items():
+            if len(bounds) == 3 and bounds[2] == 'log':
+                param_types[param] = 'log'
+            elif isinstance(bounds[0], int):
+                param_types[param] = 'int'
+            else:
+                param_types[param] = 'float'
+
+        return StrategyParameters(
+            values={},
+            bounds={k: v[:2] for k, v in param_settings.items()},
+            parameter_types=param_types
+        )
+
     def _run_optimization(self, settings: Dict[str, Any]) -> None:
-        """Run optimization with progress tracking."""
+        """Run optimization with proper pipeline handling."""
         try:
             with st.spinner("Running optimization..."):
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
+                if settings['data_settings']['uploaded_file']:
+                    data = pd.read_csv(settings['data_settings']['uploaded_file'])
+                    data.index = pd.to_datetime(data.index)
+                    start_date = pd.to_datetime(settings['data_settings']['start_date'])
+                    end_date = pd.to_datetime(settings['data_settings']['end_date'])
+                    data = data[(data.index >= start_date) & (data.index <= end_date)]
+
+                    if data.empty:
+                        raise ValueError("No data available for selected date range")
+                else:
+                    raise ValueError("No data file uploaded")
+
+                strategy_params = StrategyParameters(
+                    values={},
+                    bounds=settings['param_settings'],
+                    parameter_types={k: 'float' for k in settings['param_settings'].keys()},
+                    descriptions={}
+                )
+
+                strategy_class = load_strategy(self.strategies[settings['strategy_type']])
+                strategy = strategy_class()
+
                 self.backend.initialize(
-                    strategy=settings['strategy_type'],
-                    parameters=settings['param_settings'],
-                    data=settings['data_settings'],
+                    strategy=strategy,
+                    data=data,
+                    parameters=strategy_params,
                     settings=settings['opt_settings']
                 )
 
                 results = self.backend.optimize(
+                    method=settings['opt_settings'].get('method', 'bayesian'),
                     progress_callback=lambda p: progress_bar.progress(p),
                     status_callback=lambda s: status_text.text(s)
                 )
 
-                progress_bar.empty()
-                status_text.empty()
+                display_results = {
+                    'best_score': results['best_score'],
+                    'total_trials': results['n_trials'],
+                    'time_taken': results['time_taken'],
+                    'best_parameters': results['best_parameters'],
+                    'optimization_history': results.get('optimization_history', []),
+                    'settings': settings['opt_settings']
+                }
 
-                self._display_results(results)
+                self._display_results(display_results)
 
         except Exception as e:
             st.error(f"Optimization failed: {str(e)}")
