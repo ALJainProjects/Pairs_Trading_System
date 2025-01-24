@@ -254,14 +254,12 @@ class PairsTradingDL(BaseStrategy):
                 asset1, asset2 = pair
                 logger.info(f"Training models for pair {asset1}-{asset2}")
 
-                # Prepare pair data with features
                 pair_data = self.prepare_pair_data(
                     stock1_prices=train_data[asset1],
                     stock2_prices=train_data[asset2],
                     start_idx=self.sequence_length
                 )
 
-                # Prepare sequences for spread prediction
                 X_spread, y_spread = self.spread_predictor.prepare_sequences(
                     data=pair_data,
                     target_column='spread',
@@ -272,14 +270,12 @@ class PairsTradingDL(BaseStrategy):
                     sequence_length=self.sequence_length
                 )
 
-                # Split data for spread predictor
                 train_size = len(X_spread) - int(self.validation_size * len(X_spread))
                 X_train_spread = X_spread[:train_size]
                 X_val_spread = X_spread[train_size:]
                 y_train_spread = y_spread[:train_size]
                 y_val_spread = y_spread[train_size:]
 
-                # Build and train spread predictor
                 self.spread_predictor.build_lstm_model(
                     input_shape=(self.sequence_length, X_spread.shape[2]),
                     lstm_units=[128, 64],
@@ -287,7 +283,6 @@ class PairsTradingDL(BaseStrategy):
                     dropout_rate=0.2
                 )
 
-                # Train spread predictor model
                 self.spread_predictor.train_model(
                     X_train_spread, y_train_spread,
                     X_val_spread, y_val_spread,
@@ -297,10 +292,8 @@ class PairsTradingDL(BaseStrategy):
                     model_prefix=f"spread_predictor_{asset1}_{asset2}"
                 )
 
-                # Generate signals for classification
                 predictions = self.predict_signals(pair_data)
 
-                # Prepare data for signal classifier
                 X_signal, y_signal = self.signal_classifier.prepare_sequences(
                     data=pair_data,
                     target_column='predicted_signal',
@@ -321,13 +314,11 @@ class PairsTradingDL(BaseStrategy):
                     sequence_length=self.sequence_length
                 )
 
-                # Split data for signal classifier
                 X_train_signal = X_signal[:train_size]
                 X_val_signal = X_signal[train_size:]
                 y_train_signal = y_signal[:train_size]
                 y_val_signal = y_signal[train_size:]
 
-                # Build and train signal classifier
                 self.signal_classifier.build_lstm_model(
                     input_shape=(self.sequence_length, X_signal.shape[2]),
                     lstm_units=[64, 32],
@@ -344,7 +335,6 @@ class PairsTradingDL(BaseStrategy):
                     model_prefix=f"signal_classifier_{asset1}_{asset2}"
                 )
 
-                # Store models and metadata
                 self.pair_models[pair] = {
                     'spread_predictor': self.spread_predictor,
                     'signal_classifier': self.signal_classifier,

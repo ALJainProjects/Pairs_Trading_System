@@ -63,7 +63,7 @@ class FeatureEngineer:
     def add_moving_average(self,
                            df: pd.DataFrame,
                            window: int = 20,
-                           column: str = "Close",
+                           column: str = "Adj_Close",
                            ma_type: str = "simple") -> pd.DataFrame:
         """
         Add moving average with configurable type.
@@ -106,7 +106,7 @@ class FeatureEngineer:
     def add_rsi(self,
                 df: pd.DataFrame,
                 window: int = 14,
-                column: str = "Close",
+                column: str = "Adj_Close",
                 method: str = "wilder") -> pd.DataFrame:
         """
         Add RSI with configurable calculation method.
@@ -158,7 +158,7 @@ class FeatureEngineer:
                  fast_period: int = 12,
                  slow_period: int = 26,
                  signal_period: int = 9,
-                 column: str = "Close") -> pd.DataFrame:
+                 column: str = "Adj_Close") -> pd.DataFrame:
         """Add MACD indicator."""
         if self.validate:
             self._validate_data(df, [column])
@@ -191,7 +191,7 @@ class FeatureEngineer:
                             df: pd.DataFrame,
                             window: int = 20,
                             num_std: float = 2.0,
-                            column: str = "Close") -> pd.DataFrame:
+                            column: str = "Adj_Close") -> pd.DataFrame:
         """Add Bollinger Bands."""
         if self.validate:
             self._validate_data(df, [column])
@@ -224,7 +224,7 @@ class FeatureEngineer:
                               window: int = 20) -> pd.DataFrame:
         """Add volume-based indicators."""
         if self.validate:
-            self._validate_data(df, ["Close", "Volume"])
+            self._validate_data(df, ["Adj_Close", "Volume"])
 
         df = df.copy()
         min_periods = self.min_periods or window
@@ -234,11 +234,11 @@ class FeatureEngineer:
             min_periods=min_periods
         ).mean()
 
-        df["OBV"] = (np.sign(df["Close"].diff()) *
+        df["OBV"] = (np.sign(df["Adj_Close"].diff()) *
                      df["Volume"]).fillna(0).cumsum()
 
         df["VPT"] = (df["Volume"] *
-                     df["Close"].pct_change()).fillna(0).cumsum()
+                     df["Adj_Close"].pct_change()).fillna(0).cumsum()
 
         return self._handle_nans(df, ["Volume_SMA", "OBV", "VPT"])
 
@@ -255,7 +255,7 @@ class FeatureEngineer:
         logger.info("Generating technical indicators")
 
         if self.validate:
-            self._validate_data(df, ["Close"])
+            self._validate_data(df, ["Adj_Close"])
 
         df = df.copy()
 

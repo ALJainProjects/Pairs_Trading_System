@@ -33,7 +33,7 @@ class CorrelationConfig:
     """Configuration for correlation analysis."""
     CORRELATION_THRESHOLDS: Dict[str, float] = None
     MIN_OBSERVATIONS: int = 30
-    DEFAULT_WINDOW: int = 63
+    DEFAULT_WINDOW: int = 504
     MAX_ASSETS_DISPLAY: int = 150
     TIMEOUT_SECONDS: int = 300
 
@@ -375,22 +375,20 @@ class CorrelationAnalyzer:
             raise CalculationError(f"Failed to test correlation significance: {str(e)}")
 
     def plot_correlation_matrix(self,
-                              correlation_type: str = 'pearson',
-                              title: Optional[str] = None,
-                              colormap: Optional[str] = None,
-                              size: Optional[Tuple[int, int]] = None) -> go.Figure:
-        """Plot correlation matrix heatmap."""
+                                correlation_type: str = 'pearson',
+                                title: Optional[str] = None,
+                                colormap: Optional[str] = None,
+                                size: Optional[Tuple[int, int]] = None) -> go.Figure:
+        """Plot correlation matrix heatmap with proper title."""
         try:
             if correlation_type == 'pearson':
                 if self.pearson_corr_ is None:
                     self.calculate_pearson_correlation()
                 corr_matrix = self.pearson_corr_
-                title = title or 'Pearson Correlation Matrix'
             elif correlation_type == 'partial':
                 if self.partial_corr_ is None:
                     self.calculate_partial_correlation()
                 corr_matrix = self.partial_corr_
-                title = title or 'Partial Correlation Matrix'
             else:
                 raise ValueError("correlation_type must be 'pearson' or 'partial'")
 
@@ -411,8 +409,10 @@ class CorrelationAnalyzer:
                 showscale=True
             ))
 
+            display_title = title or f"{correlation_type.capitalize()} Correlation Matrix"
+
             fig.update_layout(
-                title=title,
+                title=display_title,
                 xaxis_title="Assets",
                 yaxis_title="Assets",
                 width=size[0],

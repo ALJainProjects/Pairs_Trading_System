@@ -11,7 +11,7 @@ from typing import Optional
 
 import pandas as pd
 import numpy as np
-from statsmodels.tsa.stattools import coint
+from statsmodels.tsa.stattools import coint, adfuller
 from config.logging_config import logger
 import os
 import plotly.graph_objects as go
@@ -23,7 +23,8 @@ LOOKBACK_PERIODS = {
     '1M': 21,
     '3M': 63,
     '6M': 126,
-    '12M': 252
+    '12M': 252,
+    '24M': 504
 }
 
 
@@ -45,26 +46,35 @@ def determine_cointegration(series1: pd.Series, series2: pd.Series, significance
     return p_value < significance_level, score, p_value, critical_values
 
 
+def check_integration_order(series: pd.Series) -> bool:
+    """
+    Check if a series is I(1) by testing:
+    1. Non-stationary in levels
+    2. Stationary in first differences
+    """
+    adf_level = adfuller(series, regression='c')[1]
+    if adf_level < 0.05:
+        return False
+
+    adf_diff = adfuller(series.diff().dropna(), regression='c')[1]
+    return adf_diff < 0.05
+
 def calculate_half_life(spread: pd.Series) -> float:
     """
-    Calculate the half-life of mean reversion for a spread series.
-
-    Args:
-        spread (pd.Series): Price spread series
-
-    Returns:
-        float: Half-life in periods
+    Calculate the half-life of mean reversion for a spread series with stationarity check.
     """
+    adf_result = adfuller(spread)
+    if adf_result[1] > 0.05:
+        return np.nan
+
     lag_spread = spread.shift(1)
     delta_spread = spread - lag_spread
     lag_spread = lag_spread[1:]
     delta_spread = delta_spread[1:]
 
-    # Regression: delta_spread = alpha + beta * lag_spread + epsilon
     beta = np.polyfit(lag_spread, delta_spread, 1)[0]
     half_life = -np.log(2) / beta if beta < 0 else np.nan
     return half_life
-
 
 def find_cointegrated_pairs(prices: pd.DataFrame,
                             lookback_period: int,
@@ -73,63 +83,66 @@ def find_cointegrated_pairs(prices: pd.DataFrame,
                             min_half_life: int = 5,
                             max_half_life: int = 126) -> list:
     """
-    Find all pairs of assets that are cointegrated.
+    Find cointegrated pairs with improved statistical checks and efficiency.
 
-    Args:
-        prices (pd.DataFrame): Price data for all assets
-        lookback_period (int): Number of days to look back
-        significance_level (float): Significance level for cointegration test
-        max_pairs (Optional[int]): Maximum number of pairs to return
-        min_half_life (int): Minimum half-life in days
-        max_half_life (int): Maximum half-life in days
-
-    Returns:
-        list: List of dictionaries containing pair information
+    New Parameters:
+        min_correlation (float): Minimum correlation threshold for pairs
     """
-    logger.info(f"Searching for cointegrated pairs with {lookback_period} days lookback.")
-
     recent_prices = prices.iloc[-lookback_period:]
-
     n = recent_prices.shape[1]
     cointegrated_pairs = []
-
     total_pairs = (n * (n - 1)) // 2
     completed_pairs = 0
+    failed_pairs = 0
 
     for i in range(n):
         for j in range(i + 1, n):
             s1 = recent_prices.iloc[:, i]
             s2 = recent_prices.iloc[:, j]
+            s1 = s1.ffill().bfill()
+            s2 = s2.ffill().bfill()
 
-            spread = s1 - s2 * np.polyfit(s2, s1, 1)[0]
-            half_life = calculate_half_life(spread)
-
-            if half_life < min_half_life or half_life > max_half_life:
+            if not (check_integration_order(s1) and check_integration_order(s2)):
                 completed_pairs += 1
+                failed_pairs += 1
                 continue
 
             score, p_value, critical_values = coint(s1, s2)
+            if p_value >= significance_level:
+                completed_pairs += 1
+                failed_pairs += 1
+                continue
 
-            if p_value < significance_level:
-                pair_info = {
-                    'stock1': recent_prices.columns[i],
-                    'stock2': recent_prices.columns[j],
-                    'p_value': p_value,
-                    'score': score,
-                    'critical_values': critical_values,
-                    'half_life': half_life
-                }
-                cointegrated_pairs.append(pair_info)
+            beta, alpha = np.polyfit(s2, s1, 1)
+            spread = s1 - (alpha + beta * s2)
+
+            half_life = calculate_half_life(spread)
+            if np.isnan(half_life) or half_life < min_half_life or half_life > max_half_life:
+                completed_pairs += 1
+                failed_pairs += 1
+                continue
+
+            pair_info = {
+                'stock1': recent_prices.columns[i],
+                'stock2': recent_prices.columns[j],
+                'p_value': p_value,
+                'score': score,
+                'critical_values': critical_values,
+                'half_life': half_life,
+                'beta': beta,
+                'alpha': alpha
+            }
+            cointegrated_pairs.append(pair_info)
 
             completed_pairs += 1
             if completed_pairs % 100 == 0:
                 logger.info(f"Progress: {completed_pairs}/{total_pairs} pairs tested")
+                logger.info(f"Failed Pairs: {failed_pairs}/{total_pairs} of pairs tested")
 
     cointegrated_pairs = sorted(cointegrated_pairs, key=lambda x: x['p_value'])
     if max_pairs is not None and max_pairs < len(cointegrated_pairs):
         cointegrated_pairs = cointegrated_pairs[:max_pairs]
 
-    logger.info(f"Total cointegrated pairs found: {len(cointegrated_pairs)}")
     return cointegrated_pairs
 
 def plot_cointegrated_pair(prices: pd.DataFrame, stock1: str, stock2: str, lookback_period: int) -> go.Figure:
@@ -276,9 +289,60 @@ def create_summary_report(all_pairs_results: dict, output_dir: str):
                 f.write(f"p-value = {pair['p_value']:.4f}, ")
                 f.write(f"half-life = {pair['half_life']:.1f} days\n")
 
+def dynamic_cointegration_with_proportion(prices: pd.DataFrame, stock1: str, stock2: str,
+                                          window_size: int, significance_level: float = 0.05) -> tuple:
+    """
+    Perform rolling-window cointegration tests and calculate the proportion of significant p-values.
+
+    Args:
+        prices (pd.DataFrame): Price data for all assets.
+        stock1 (str): First stock ticker.
+        stock2 (str): Second stock ticker.
+        window_size (int): Size of the rolling window.
+        significance_level (float): Significance level for cointegration test.
+
+    Returns:
+        tuple: (results_df, proportion_significant)
+            - results_df: DataFrame with p-values, scores, and half-lives for each window.
+            - proportion_significant: Proportion of windows with p-value < significance_level.
+    """
+    results = []
+    significant_count = 0
+    total_windows = len(prices) - window_size
+
+    for start in range(total_windows):
+        end = start + window_size
+        window_prices = prices.iloc[start:end]
+
+        s1 = window_prices[stock1]
+        s2 = window_prices[stock2]
+
+        # Perform cointegration test
+        try:
+            score, p_value, critical_values = coint(s1, s2)
+            spread = s1 - s2 * np.polyfit(s2, s1, 1)[0]
+            half_life = calculate_half_life(spread)
+        except Exception as e:
+            logger.warning(f"Cointegration failed for window {start}-{end}: {e}")
+            p_value, score, half_life = np.nan, np.nan, np.nan
+
+        if not np.isnan(p_value) and p_value < significance_level:
+            significant_count += 1
+
+        results.append({
+            'start_date': window_prices.index[0],
+            'end_date': window_prices.index[-1],
+            'p_value': p_value,
+            'score': score,
+            'half_life': half_life
+        })
+
+    results_df = pd.DataFrame(results)
+    proportion_significant = significant_count / total_windows if total_windows > 0 else 0
+    return results_df, proportion_significant
+
 
 if __name__ == "__main__":
-
     logger.info("Loading price data...")
     prices_df = load_nasdaq100_data()
     logger.info(f"Loaded price data for {len(prices_df.columns)} stocks")
@@ -323,3 +387,4 @@ if __name__ == "__main__":
 
     create_summary_report(all_pairs_results, base_output_dir)
     logger.info("Analysis complete. Results saved in: " + base_output_dir)
+

@@ -16,7 +16,7 @@ class MultiPairBackTester:
     def __init__(
         self,
         strategy: Any,
-        returns: pd.DataFrame,
+        prices: pd.DataFrame,
         initial_capital: float = 100000,
         risk_manager: Optional[Any] = None,
         transaction_cost: float = 0.001,
@@ -26,7 +26,8 @@ class MultiPairBackTester:
         min_liquidity_threshold: float = 100000
     ):
         self.strategy = strategy
-        self.returns = returns
+        self.prices = prices.ffill().bfill()
+        self.returns = prices.pct_change().ffill().bfill()
         self.initial_capital = initial_capital
         self.risk_manager = risk_manager
         self.transaction_cost = transaction_cost
@@ -62,17 +63,17 @@ class MultiPairBackTester:
     def run_backtest(self) -> pd.Series:
         """Execute enhanced backtest with feature engineering and monitoring"""
         logger.info("Starting backtest with enhanced monitoring")
-        self.equity_curve = pd.Series(index=self.returns.index, dtype=float)
+        self.equity_curve = pd.Series(index=self.prices.index, dtype=float)
         portfolio_value = self.initial_capital
 
         self.equity_curve.iloc[0] = portfolio_value
         features_cache = {}
 
-        for i, current_date in enumerate(self.returns.index[1:], 1):
+        for i, current_date in enumerate(self.prices.index[1:], 1):
             try:
-                historical_data = self.returns.iloc[:i + 1]
+                historical_prices = self.prices.iloc[:i + 1]
                 if i % 20 == 0:
-                    features = self._prepare_features(historical_data)
+                    features = self._prepare_features(historical_prices)
                     features_cache = features
                 else:
                     features = features_cache
@@ -80,7 +81,7 @@ class MultiPairBackTester:
                 signals = (
                     self.strategy.predict_signals(features)
                     if hasattr(self.strategy, 'predict_signals')
-                    else self.strategy.generate_signals(historical_data)
+                    else self.strategy.generate_signals(historical_prices)
                 )
 
                 portfolio_value = self._process_signals_and_update(
@@ -95,7 +96,7 @@ class MultiPairBackTester:
                 if self.risk_manager and self.risk_manager.check_risk_limits(
                     self.equity_curve,
                     self.active_pairs,
-                    self.returns.loc[current_date].to_dict()
+                    self.prices.loc[current_date].to_dict()
                 )[0]:
                     logger.warning(f"Risk limits exceeded at {current_date}")
                     break
@@ -106,6 +107,7 @@ class MultiPairBackTester:
 
         logger.info("Backtest completed")
         return self.equity_curve
+
 
     def _prepare_features(self, prices: pd.DataFrame) -> pd.DataFrame:
         """Prepare features using feature engineering"""
@@ -135,7 +137,7 @@ class MultiPairBackTester:
         Returns:
             float: Updated portfolio value
         """
-        current_prices = self.returns.loc[current_date]
+        current_prices = self.prices.loc[current_date]
 
         if isinstance(signals, pd.DataFrame) and not 'predicted_signal' in signals.columns:
             for pair in signals.columns:
@@ -153,7 +155,7 @@ class MultiPairBackTester:
                     if self.risk_manager:
                         self.risk_manager.update_risk_metrics(
                             pair,
-                            self.returns,
+                            self.prices,
                             self.active_pairs,
                             confidence
                         )
@@ -300,13 +302,17 @@ class MultiPairBackTester:
         confidence: float,
         features: pd.DataFrame
     ) -> float:
-        """Open new position"""
+        """Open new position with proper price-based calculations."""
         asset1, asset2 = pair
-        price1 = self.returns[asset1].loc[current_date]
-        price2 = self.returns[asset2].loc[current_date]
+        price1 = self.prices[asset1].loc[current_date]
+        price2 = self.prices[asset2].loc[current_date]
 
-        trade_value = quantity * (price1 + price2)
-        total_cost = trade_value * self.transaction_cost
+        position_value = abs(quantity) * (price1 + price2)
+        total_cost = position_value * self.transaction_cost
+
+        if position_value + total_cost > portfolio_value:
+            logger.warning(f"Insufficient capital for position in {pair}")
+            return portfolio_value
 
         self.active_pairs[pair] = {
             'signal': signal,
@@ -317,12 +323,6 @@ class MultiPairBackTester:
             'features': features.iloc[-1].to_dict() if not features.empty else {},
             'transaction_costs': total_cost
         }
-
-        if not features.empty:
-            for feature, value in features.iloc[-1].items():
-                if feature not in self.feature_history:
-                    self.feature_history[feature] = []
-                self.feature_history[feature].append(float(value))
 
         self.trade_history = pd.concat([
             self.trade_history,
@@ -339,7 +339,7 @@ class MultiPairBackTester:
             }])
         ], ignore_index=True)
 
-        return portfolio_value - total_cost
+        return portfolio_value - total_cost - position_value
 
     def _close_position(
         self,
@@ -418,6 +418,16 @@ class MultiPairBackTester:
 
     def _calculate_performance_metrics(self) -> Dict:
         """Calculate key performance metrics"""
+        if len(self.equity_curve) < 2:
+            return {
+                'Total Return': 0.0,
+                'Annual Return': 0.0,
+                'Annual Volatility': 0.0,
+                'Sharpe Ratio': 0.0,
+                'Max Drawdown': 0.0,
+                'Win Rate': 0.0
+            }
+
         returns = self.equity_curve.pct_change().dropna()
 
         return {

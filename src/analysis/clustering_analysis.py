@@ -220,7 +220,7 @@ class AssetClusteringAnalyzer:
             index=prices.index
         )
 
-        returns = prices.pct_change().dropna()
+        returns = prices
         volatility = returns.std()
         correlation = returns.corr()
 
@@ -259,7 +259,7 @@ class AssetClusteringAnalyzer:
             dist_matrix = self.calculate_cointegration_matrix(prices)
             dist_matrix = 1 - dist_matrix
         else:
-            returns = prices.pct_change().dropna()
+            returns = prices
             dist_matrix = 1 - returns.corr()
 
         dbs = DBSCAN(eps=eps, min_samples=min_samples, metric=metric)
@@ -285,7 +285,7 @@ class AssetClusteringAnalyzer:
         """
         self._validate_input(prices)
 
-        returns = prices.pct_change().dropna()
+        returns = prices
         if metric == 'precomputed':
             dist_matrix = 1 - returns.corr()
             agglom = AgglomerativeClustering(

@@ -1,3 +1,5 @@
+import time
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -26,13 +28,23 @@ class EnhancedPairAnalyzer:
         """Render the enhanced pair analysis interface."""
         st.header("Pair Analysis & Selection")
 
+        self.status_container = st.empty()
+        self.progress_bar = st.empty()
+
         if 'historical_data' not in st.session_state:
             st.warning("Please load data first in the Data Loading section.")
             return
 
-        if self.correlation_analyzer is None:
-            returns = self._calculate_returns(st.session_state['historical_data'])
-            self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
+        try:
+            with self.status_container.container():
+                st.info("Initializing analysis components...")
+            if self.correlation_analyzer is None:
+                returns = self._calculate_returns(st.session_state['historical_data'])
+                self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
+                self.status_container.empty()
+        except Exception as e:
+            self.status_container.error(f"Initialization failed: {str(e)}")
+            return
 
         tab1, tab2, tab3, tab4 = st.tabs([
             "Correlation Analysis",
@@ -54,7 +66,9 @@ class EnhancedPairAnalyzer:
             self._render_selected_pairs()
 
     def _render_correlation_analysis(self):
-        """Render correlation analysis section."""
+        """Render correlation analysis section with progress tracking."""
+        progress_bar = st.progress(0)
+        status_text = st.empty()
         st.subheader("Correlation Analysis")
 
         col1, col2 = st.columns(2)
@@ -69,8 +83,8 @@ class EnhancedPairAnalyzer:
             lookback = st.number_input(
                 "Lookback Period (days)",
                 min_value=30,
-                max_value=252,
-                value=126
+                max_value=504,
+                value=252
             )
 
         with col2:
@@ -81,47 +95,68 @@ class EnhancedPairAnalyzer:
             rolling_window = st.number_input(
                 "Rolling Window (days)",
                 min_value=20,
-                max_value=126,
+                max_value=252,
                 value=63
             )
 
         if st.button("Run Correlation Analysis"):
             try:
-                with st.spinner("Running correlation analysis..."):
-                    returns = self._calculate_returns(st.session_state['historical_data'])
+                status_text.text("Calculating returns...")
+                progress_bar.progress(10)
+                returns = self._calculate_returns(st.session_state['historical_data'])
+                returns = returns.tail(lookback)
 
-                    returns = returns.tail(lookback)
+                status_text.text("Initializing correlation analyzer...")
+                progress_bar.progress(20)
+                self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
 
-                    self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
+                status_text.text(f"Calculating {correlation_method} correlation matrix...")
+                progress_bar.progress(40)
 
-                    if correlation_method == 'pearson':
-                        corr_matrix = self.correlation_analyzer.calculate_pearson_correlation()
-                    else:
-                        corr_matrix = self.correlation_analyzer.calculate_partial_correlation()
+                if correlation_method == 'pearson':
+                    corr_matrix = self.correlation_analyzer.calculate_pearson_correlation()
+                else:
+                    corr_matrix = self.correlation_analyzer.calculate_partial_correlation()
 
-                    pairs = self.correlation_analyzer.get_highly_correlated_pairs(
-                        correlation_type=correlation_method,
-                        threshold=correlation_threshold,
-                        absolute=True
-                    )
+                status_text.text("Identifying correlated pairs...")
+                progress_bar.progress(60)
+                pairs = self.correlation_analyzer.get_highly_correlated_pairs(
+                    correlation_type=correlation_method,
+                    threshold=correlation_threshold,
+                    absolute=True
+                )
 
-                    rolling_corrs = self.correlation_analyzer.calculate_rolling_correlation(
-                        window=rolling_window
-                    )
 
-                    st.session_state['correlation_results'] = {
-                        'matrix': corr_matrix,
-                        'pairs': pairs,
-                        'rolling': rolling_corrs
-                    }
+                status_text.text("Computing rolling correlations...")
+                progress_bar.progress(80)
+                rolling_corrs = self.correlation_analyzer.calculate_rolling_correlation(
+                    window=rolling_window
+                )
 
-                    self._display_correlation_results(corr_matrix, pairs, returns, rolling_corrs)
+                status_text.text("Storing results...")
+                progress_bar.progress(90)
+                st.session_state['correlation_results'] = {
+                    'matrix': corr_matrix,
+                    'pairs': pairs,
+                    'rolling': rolling_corrs,
+                    'method': correlation_method
+                }
+
+                status_text.text("Generating visualizations...")
+                progress_bar.progress(95)
+                self._display_correlation_results(pairs, returns, rolling_corrs, correlation_method)
+
+                progress_bar.progress(100)
+                status_text.success("Correlation analysis complete!")
 
             except Exception as e:
-                st.error(f"Error in correlation analysis: {str(e)}")
+                status_text.error(f"Error in correlation analysis: {str(e)}")
+            finally:
+                time.sleep(1)
+                progress_bar.empty()
 
     def _render_cointegration_analysis(self):
-        """Render cointegration analysis section."""
+        """Render cointegration analysis section with progress tracking."""
         st.subheader("Cointegration Analysis")
 
         col1, col2 = st.columns(2)
@@ -129,54 +164,78 @@ class EnhancedPairAnalyzer:
             significance_level = st.slider(
                 "Significance Level",
                 min_value=0.01,
-                max_value=0.10,
+                max_value=0.30,
                 value=0.05,
                 step=0.01
             )
             max_pairs = st.number_input(
                 "Maximum Pairs to Test",
                 min_value=10,
-                max_value=1000,
-                value=100
+                max_value=10000,
+                value=5050
             )
 
         with col2:
             min_half_life = st.number_input(
                 "Minimum Half-Life (days)",
                 min_value=1,
-                max_value=30,
+                max_value=150,
                 value=5
             )
             max_half_life = st.number_input(
                 "Maximum Half-Life (days)",
                 min_value=31,
-                max_value=252,
+                max_value=504,
                 value=126
+            )
+            lookback_window = st.number_input(
+                "Lookback_window (days)",
+                min_value=31,
+                max_value=756,
+                value=504
             )
 
         if st.button("Run Cointegration Analysis"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
             try:
-                with st.spinner("Running cointegration analysis..."):
-                    prices = self._get_price_data(st.session_state['historical_data'])
+                status_text.text("Preparing price data...")
+                progress_bar.progress(10)
+                prices = self._get_price_data(st.session_state['historical_data'])
+                prices = prices.ffill().bfill()
 
-                    cointegrated_pairs = find_cointegrated_pairs(
-                        prices=prices,
-                        significance_level=significance_level,
-                        lookback_period=31,
-                        max_pairs=max_pairs,
-                        min_half_life=min_half_life,
-                        max_half_life=max_half_life
-                    )
+                status_text.text("Initializing cointegration analysis...")
+                progress_bar.progress(20)
 
-                    st.session_state['cointegration_results'] = cointegrated_pairs
+                cointegrated_pairs = find_cointegrated_pairs(
+                    prices=prices.ffill().bfill(),
+                    significance_level=significance_level,
+                    lookback_period=lookback_window,
+                    max_pairs=max_pairs,
+                    min_half_life=min_half_life,
+                    max_half_life=max_half_life,
+                )
 
-                    self._display_cointegration_results(cointegrated_pairs, prices)
+                status_text.text("Storing results...")
+                progress_bar.progress(90)
+                st.session_state['cointegration_results'] = cointegrated_pairs
+
+                status_text.text("Generating visualizations...")
+                progress_bar.progress(95)
+                self._display_cointegration_results(cointegrated_pairs, prices)
+
+                progress_bar.progress(100)
+                status_text.success("Cointegration analysis complete!")
 
             except Exception as e:
-                st.error(f"Error in cointegration analysis: {str(e)}")
+                status_text.error(f"Error in cointegration analysis: {str(e)}")
+            finally:
+                time.sleep(1)
+                progress_bar.empty()
 
     def _render_clustering_analysis(self):
-        """Render clustering analysis section."""
+        """Render clustering analysis section with progress tracking."""
         st.subheader("Clustering Analysis")
 
         col1, col2 = st.columns(2)
@@ -208,89 +267,146 @@ class EnhancedPairAnalyzer:
             )
 
         if st.button("Run Clustering Analysis"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
             try:
-                with st.spinner("Running clustering analysis..."):
-                    returns = self._calculate_returns(st.session_state['historical_data'])
+                status_text.text("Preparing return data...")
+                progress_bar.progress(10)
+                returns = self._calculate_returns(st.session_state['historical_data'])
+                returns = returns.ffill().bfill()
+                returns = returns.dropna()
 
-                    if clustering_method == "kmeans":
-                        clusters = self.clustering_analyzer.kmeans_clustering(
-                            returns,
-                            n_clusters=n_clusters
-                        )
-                    elif clustering_method == "dbscan":
-                        clusters = self.clustering_analyzer.dbscan_clustering(
-                            returns,
-                            eps=1 - similarity_threshold,
-                            min_samples=min_cluster_size
-                        )
-                    elif clustering_method == "hierarchical":
-                        clusters = self.clustering_analyzer.agglomerative_clustering(
-                            returns,
-                            n_clusters=n_clusters
-                        )
-                    else:
-                        clusters = self.clustering_analyzer.graph_based_clustering(
-                            returns.corr(),
-                            threshold=similarity_threshold,
-                            min_cluster_size=min_cluster_size
-                        )
+                status_text.text(f"Initializing {clustering_method} clustering...")
+                progress_bar.progress(30)
 
-                    st.session_state['clustering_results'] = clusters
+                status_text.text("Running clustering algorithm...")
+                progress_bar.progress(50)
 
-                    self._display_clustering_results(clusters, returns)
+                if clustering_method == "kmeans":
+                    clusters = self.clustering_analyzer.kmeans_clustering(
+                        returns,
+                        n_clusters=n_clusters
+                    )
+                elif clustering_method == "dbscan":
+                    clusters = self.clustering_analyzer.dbscan_clustering(
+                        returns,
+                        eps=1 - similarity_threshold,
+                        min_samples=min_cluster_size
+                    )
+                elif clustering_method == "hierarchical":
+                    clusters = self.clustering_analyzer.agglomerative_clustering(
+                        returns,
+                        n_clusters=n_clusters
+                    )
+                else:
+                    clusters = self.clustering_analyzer.graph_based_clustering(
+                        returns.corr(),
+                        threshold=similarity_threshold,
+                        min_cluster_size=min_cluster_size
+                    )
+
+                status_text.text("Storing clustering results...")
+                progress_bar.progress(80)
+                st.session_state['clustering_results'] = clusters
+
+                status_text.text("Generating visualizations...")
+                progress_bar.progress(90)
+                self._display_clustering_results(clusters, returns)
+
+                progress_bar.progress(100)
+                status_text.success("Clustering analysis complete!")
 
             except Exception as e:
-                st.error(f"Error in clustering analysis: {str(e)}")
+                status_text.error(f"Error in clustering analysis: {str(e)}")
+            finally:
+                time.sleep(1)
+                progress_bar.empty()
 
     def _render_selected_pairs(self):
-        """Render selected pairs section."""
+        """Render selected pairs section with progress tracking."""
         st.subheader("Selected Trading Pairs")
 
-        correlation_pairs = set(
-            self._get_pairs_from_correlation()
-            if 'correlation_results' in st.session_state else set()
-        )
-        cointegration_pairs = set(
-            self._get_pairs_from_cointegration()
-            if 'cointegration_results' in st.session_state else set()
-        )
-        clustering_pairs = set(
-            self._get_pairs_from_clustering()
-            if 'clustering_results' in st.session_state else set()
-        )
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-        intersection = correlation_pairs.intersection(cointegration_pairs)
-        if clustering_pairs:
-            intersection = intersection.intersection(clustering_pairs)
+        try:
+            status_text.text("Gathering pairs from analyses...")
+            progress_bar.progress(20)
 
-        self._plot_pair_overlap(
-            correlation_pairs,
-            cointegration_pairs,
-            clustering_pairs
-        )
+            correlation_pairs = set(
+                self._get_pairs_from_correlation()
+                if 'correlation_results' in st.session_state else set()
+            )
+            cointegration_pairs = set(
+                self._get_pairs_from_cointegration()
+                if 'cointegration_results' in st.session_state else set()
+            )
+            clustering_pairs = set(
+                self._get_pairs_from_clustering()
+                if 'clustering_results' in st.session_state else set()
+            )
 
-        st.subheader("Pair Selection")
-        selected_pairs = st.multiselect(
-            "Select pairs for trading",
-            list(correlation_pairs.union(cointegration_pairs, clustering_pairs)),
-            default=list(intersection)
-        )
+            status_text.text("Finding pair intersections...")
+            progress_bar.progress(40)
 
-        if st.button("Confirm Selected Pairs"):
-            if selected_pairs:
-                st.session_state['selected_pairs'] = pd.DataFrame({
-                    'Pair': selected_pairs
-                })
-                st.success(f"Selected {len(selected_pairs)} pairs for trading!")
-            else:
-                st.warning("Please select at least one pair.")
+            use_clustering = st.checkbox(
+                "Include clustering pairs in intersection",
+                value=False,
+                help="When checked, pairs must appear in correlation, cointegration, AND clustering analyses. When unchecked, pairs only need to appear in correlation AND cointegration analyses."
+            )
+
+            intersection = correlation_pairs.intersection(cointegration_pairs)
+            if clustering_pairs and use_clustering:
+                intersection = intersection.intersection(clustering_pairs)
+
+            st.write(f"Correlation pairs: {correlation_pairs}")
+            st.write(f"Cointegration pairs: {cointegration_pairs}")
+            if clustering_pairs:
+                st.write(f"Clustering pairs: {clustering_pairs}")
+            st.write(f"Intersection pairs: {intersection}")
+
+            status_text.text("Generating pair overlap visualization...")
+            progress_bar.progress(60)
+            self._plot_pair_overlap(
+                correlation_pairs,
+                cointegration_pairs,
+                clustering_pairs
+            )
+
+            status_text.text("Preparing pair selection interface...")
+            progress_bar.progress(80)
+            st.subheader("Pair Selection")
+            selected_pairs = st.multiselect(
+                "Select pairs for trading",
+                list(correlation_pairs.union(cointegration_pairs, clustering_pairs)),
+                default=list(intersection)
+            )
+
+            if st.button("Confirm Selected Pairs"):
+                if selected_pairs:
+                    status_text.text("Saving selected pairs...")
+                    progress_bar.progress(90)
+                    st.session_state['selected_pairs'] = pd.DataFrame({
+                        'Pair': selected_pairs
+                    })
+                    progress_bar.progress(100)
+                    status_text.success(f"Selected {len(selected_pairs)} pairs for trading!")
+                else:
+                    status_text.warning("Please select at least one pair.")
+
+        except Exception as e:
+            status_text.error(f"Error in pair selection: {str(e)}")
+        finally:
+            time.sleep(1)
+            progress_bar.empty()
 
     def _calculate_returns(self, data: pd.DataFrame) -> pd.DataFrame:
         """Calculate returns from price data."""
         prices = data.pivot(
-            index='date',
-            columns='ticker',
-            values='adj_close'
+            index='Date',
+            columns='Symbol',
+            values='Adj_Close'
         )
         returns = prices.pct_change().dropna()
         return returns
@@ -298,20 +414,17 @@ class EnhancedPairAnalyzer:
     def _get_price_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """Get price data in proper format."""
         return data.pivot(
-            index='date',
-            columns='ticker',
-            values='adj_close'
+            index='Date',
+            columns='Symbol',
+            values='Adj_Close'
         )
 
-    def _display_correlation_results(self,
-                                     corr_matrix: pd.DataFrame,
-                                     pairs: pd.DataFrame,
-                                     returns: pd.DataFrame,
-                                     rolling_corrs: Dict[str, pd.Series]):
-        """Display correlation analysis results."""
+    def _display_correlation_results(self, pairs, returns, rolling_corrs, correlation_method):
+        """Display correlation analysis results with the correct correlation type."""
         try:
             fig = self.correlation_analyzer.plot_correlation_matrix(
-                correlation_type='pearson' if 'pearson' in str(type(corr_matrix)) else 'partial'
+                correlation_type=correlation_method,
+                title=f"{correlation_method.capitalize()} Correlation Matrix"
             )
             st.plotly_chart(fig)
 
@@ -544,6 +657,7 @@ class EnhancedPairAnalyzer:
         pair_metrics = []
         returns = self._calculate_returns(st.session_state['historical_data'])
         prices = self._get_price_data(st.session_state['historical_data'])
+        prices = prices.ffill().bfill()
 
         def _single_coint_test(asset1: pd.Series,
                                asset2: pd.Series) -> float:

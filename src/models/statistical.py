@@ -5,12 +5,14 @@ Enhancements:
  1. More robust cointegration testing using Engle-Granger and optional Johansen.
  2. Spread calculation with optional ratio-based spread.
  3. Extended docstrings for usage in a pair trading workflow.
+ 4. Additional trading signals including Moving Average Crossover, Bollinger Bands, and RSI
 """
 import os
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
-from statsmodels.tsa.stattools import coint
+from statsmodels.tsa.stattools import coint, adfuller
 from statsmodels.regression.linear_model import OLS
 from statsmodels.tools import add_constant
 from config.logging_config import logger
@@ -18,7 +20,6 @@ from statsmodels.tsa.vector_ar.vecm import coint_johansen
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from config.settings import MODEL_DIR
 
 
 class StatisticalModel:
@@ -29,6 +30,9 @@ class StatisticalModel:
       - Optional Johansen cointegration test (if installed)
       - Calculating a spread between two assets via regression
       - Mean reversion signal generation
+      - Moving Average Crossover signals
+      - Bollinger Bands signals
+      - RSI-based signals
     """
 
     def __init__(self):
@@ -124,10 +128,243 @@ class StatisticalModel:
         signals[zscore < -z_threshold] = 1.0
         return signals
 
+    def moving_average_crossover_signal(self, spread: pd.Series, short_window: int = 10, long_window: int = 50) -> pd.Series:
+        """
+        Generate trading signals based on moving average crossovers.
+
+        Args:
+            spread (pd.Series): Spread series.
+            short_window (int): Window size for the short-term moving average.
+            long_window (int): Window size for the long-term moving average.
+
+        Returns:
+            pd.Series: A series of signals [1, -1, 0].
+        """
+        logger.info("Generating moving average crossover signals.")
+        short_ma = spread.rolling(short_window).mean()
+        long_ma = spread.rolling(long_window).mean()
+
+        signals = pd.Series(index=spread.index, data=0, dtype=float)
+        signals[short_ma > long_ma] = 1.0
+        signals[short_ma < long_ma] = -1.0
+        return signals
+
+    def bollinger_band_signal(self, spread: pd.Series, window: int = 20, num_std_dev: float = 2.0) -> pd.Series:
+        """
+        Generate trading signals based on Bollinger Bands.
+
+        Args:
+            spread (pd.Series): Spread series.
+            window (int): Rolling window size for the mean and standard deviation.
+            num_std_dev (float): Number of standard deviations for the bands.
+
+        Returns:
+            pd.Series: A series of signals [1, -1, 0].
+        """
+        logger.info("Generating Bollinger Bands signals.")
+        roll_mean = spread.rolling(window).mean()
+        roll_std = spread.rolling(window).std()
+
+        upper_band = roll_mean + (num_std_dev * roll_std)
+        lower_band = roll_mean - (num_std_dev * roll_std)
+
+        signals = pd.Series(index=spread.index, data=0, dtype=float)
+        signals[spread < lower_band] = 1.0  # Long signal
+        signals[spread > upper_band] = -1.0  # Short signal
+        return signals
+
+    def rsi_signal(self, spread: pd.Series, window: int = 14,
+                  lower_threshold: float = 30, upper_threshold: float = 70) -> pd.Series:
+        """
+        Generate trading signals based on the RSI of the spread.
+
+        Args:
+            spread (pd.Series): Spread series.
+            window (int): Window size for RSI calculation.
+            lower_threshold (float): RSI level to trigger a long signal.
+            upper_threshold (float): RSI level to trigger a short signal.
+
+        Returns:
+            pd.Series: A series of signals [1, -1, 0].
+        """
+        logger.info("Generating RSI-based signals.")
+        delta = spread.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window).mean()
+
+        rs = gain / (loss + 1e-12)
+        rsi = 100 - (100 / (1 + rs))
+
+        signals = pd.Series(index=spread.index, data=0, dtype=float)
+        signals[rsi < lower_threshold] = 1.0  # Long signal
+        signals[rsi > upper_threshold] = -1.0  # Short signal
+        return signals
+
+    def combine_signals(self, signal_series_list: list, weights: list = None) -> pd.Series:
+        """
+        Combine multiple trading signals using weighted average.
+
+        Args:
+            signal_series_list (list): List of signal series to combine.
+            weights (list): List of weights for each signal series. If None, equal weights are used.
+
+        Returns:
+            pd.Series: Combined trading signals [-1, 0, 1].
+        """
+        logger.info("Combining multiple trading signals.")
+        if weights is None:
+            weights = [1/len(signal_series_list)] * len(signal_series_list)
+
+        if len(weights) != len(signal_series_list):
+            raise ValueError("Number of weights must match number of signal series.")
+
+        combined = pd.Series(0, index=signal_series_list[0].index)
+        for signal, weight in zip(signal_series_list, weights):
+            combined += signal * weight
+
+        # Threshold the combined signal
+        final_signals = pd.Series(index=combined.index, data=0, dtype=float)
+        final_signals[combined > 0.5] = 1.0
+        final_signals[combined < -0.5] = -1.0
+
+        return final_signals
+
+    def calculate_spread_zscore(self, spread: pd.Series, window: int = 20) -> pd.Series:
+        """
+        Calculate z-score of spread based on rolling window.
+
+        Args:
+            spread (pd.Series): Spread series to calculate z-score for
+            window (int): Rolling window size for mean/std calculation
+
+        Returns:
+            pd.Series: Z-score series
+        """
+        if len(spread) < window:
+            return pd.Series(0, index=spread.index)
+
+        try:
+            rolling_mean = spread.rolling(window=window).mean()
+            rolling_std = spread.rolling(window=window).std()
+
+            # Add small constant to avoid division by zero
+            zscore = (spread - rolling_mean) / (rolling_std + 1e-8)
+            zscore = zscore.replace([np.inf, -np.inf], 0)
+
+            return zscore.fillna(0)
+
+        except Exception as e:
+            logger.error(f"Error calculating zscore: {str(e)}")
+            return pd.Series(0, index=spread.index)
+
+    def calculate_hedge_ratio(self, asset1: pd.Series, asset2: pd.Series,
+                              window: int = 63) -> float:
+        """
+        Calculate hedge ratio using rolling linear regression.
+
+        Args:
+            asset1 (pd.Series): Price series of first asset
+            asset2 (pd.Series): Price series of second asset
+            window (int): Rolling window size
+
+        Returns:
+            float: Calculated hedge ratio
+        """
+        if len(asset1) < window or len(asset2) < window:
+            return 1.0
+
+        try:
+            # Use last window of data
+            y = asset1[-window:]
+            X = add_constant(asset2[-window:])
+
+            # Run OLS regression
+            model = OLS(y, X).fit()
+            hedge_ratio = model.params[1]  # Beta coefficient
+
+            # Validate hedge ratio
+            if not np.isfinite(hedge_ratio) or abs(hedge_ratio) > 10:
+                logger.warning(f"Invalid hedge ratio {hedge_ratio}, using 1.0")
+                return 1.0
+
+            return hedge_ratio
+
+        except Exception as e:
+            logger.error(f"Error calculating hedge ratio: {str(e)}")
+            return 1.0
+
+    def calculate_half_life(self, spread: pd.Series) -> float:
+        """
+        Calculate half-life of mean reversion using Ornstein-Uhlenbeck process.
+
+        Args:
+            spread (pd.Series): Spread series
+
+        Returns:
+            float: Half-life in periods
+        """
+        try:
+            lag_spread = spread.shift(1)
+            delta_spread = spread - lag_spread
+            lag_spread = lag_spread[1:]  # Remove first NaN
+            delta_spread = delta_spread[1:]  # Remove first NaN
+
+            # Run OLS regression on spread differences
+            X = add_constant(lag_spread)
+            model = OLS(delta_spread, X).fit()
+            gamma = model.params[1]  # Speed of mean reversion
+
+            # Calculate half-life
+            half_life = -np.log(2) / gamma if gamma < 0 else np.inf
+
+            # Validate half-life
+            if not np.isfinite(half_life) or half_life < 0:
+                logger.warning(f"Invalid half-life {half_life}, using inf")
+                return np.inf
+
+            return half_life
+
+        except Exception as e:
+            logger.error(f"Error calculating half-life: {str(e)}")
+            return np.inf
+
+    def calculate_cointegration_score(self, asset1: pd.Series, asset2: pd.Series,
+                                      window: int = 252) -> Tuple[float, float]:
+        """
+        Calculate cointegration test statistics using rolling window.
+
+        Args:
+            asset1 (pd.Series): First asset prices
+            asset2 (pd.Series): Second asset prices
+            window (int): Rolling window size
+
+        Returns:
+            Tuple[float, float]: Cointegration test statistic and p-value
+        """
+        try:
+            if len(asset1) < window or len(asset2) < window:
+                return 0.0, 1.0
+
+            # Get last window of data
+            y = asset1[-window:]
+            x = asset2[-window:]
+
+            # Run augmented Dickey-Fuller test on spread
+            hedge_ratio = self.calculate_hedge_ratio(y, x)
+            spread = y - hedge_ratio * x
+
+            adf_stat, pvalue, _ = adfuller(spread, maxlag=int(np.sqrt(len(spread))))
+
+            return float(adf_stat), float(pvalue)
+
+        except Exception as e:
+            logger.error(f"Error in cointegration test: {str(e)}")
+            return 0.0, 1.0
+
 
 def main():
     """Test the StatisticalModel with AAPL and MSFT data."""
-    output_dir = f"{MODEL_DIR}/statistical_model"
+    output_dir = "models_data/statistical_model_v2/"
     os.makedirs(output_dir, exist_ok=True)
 
     stock1 = pd.read_csv(r"C:\Users\arnav\Downloads\pairs_trading_system\data\raw\AAPL.csv")
@@ -167,40 +404,34 @@ def main():
         use_ratio=True
     )
 
-    print("\nGenerating trading signals...")
-    signals_ols = model.mean_reversion_signal(
-        ols_spread,
-        window=20,
-        z_threshold=2.0
-    )
-    signals_ratio = model.mean_reversion_signal(
-        ratio_spread,
-        window=20,
-        z_threshold=2.0
-    )
+    print("\nGenerating trading signals using multiple methods...")
+    # Generate signals using different methods
+    signals_ols = model.mean_reversion_signal(ols_spread)
+    signals_ma = model.moving_average_crossover_signal(ols_spread)
+    signals_bb = model.bollinger_band_signal(ols_spread)
+    signals_rsi = model.rsi_signal(ols_spread)
+
+    # Combine signals with equal weights
+    combined_signals = model.combine_signals([
+        signals_ols,
+        signals_ma,
+        signals_bb,
+        signals_rsi
+    ])
 
     results = pd.DataFrame({
         'AAPL': stock1['Close'],
         'MSFT': stock2['Close'],
         'OLS_Spread': ols_spread,
         'Ratio_Spread': ratio_spread,
-        'OLS_Signals': signals_ols,
-        'Ratio_Signals': signals_ratio
+        'Mean_Reversion_Signals': signals_ols,
+        'MA_Crossover_Signals': signals_ma,
+        'Bollinger_Signals': signals_bb,
+        'RSI_Signals': signals_rsi,
+        'Combined_Signals': combined_signals
     })
 
     results.to_csv(os.path.join(output_dir, 'pair_trading_results.csv'))
-
-    with open(os.path.join(output_dir, 'statistics.txt'), 'w') as f:
-        f.write("Summary Statistics:\n\n")
-        f.write("OLS Spread Statistics:\n")
-        f.write(ols_spread.describe().to_string())
-        f.write("\n\nRatio Spread Statistics:\n")
-        f.write(ratio_spread.describe().to_string())
-        f.write("\n\nSignal Counts:\n")
-        f.write("\nOLS Signals:\n")
-        f.write(signals_ols.value_counts().to_string())
-        f.write("\n\nRatio Signals:\n")
-        f.write(signals_ratio.value_counts().to_string())
 
     def calculate_pair_returns(asset1_prices, asset2_prices, signals):
         """Calculate returns for a pairs trading strategy."""
@@ -210,126 +441,97 @@ def main():
         strategy_returns = signals.shift(1) * (asset1_returns - asset2_returns)
         return strategy_returns.cumsum()
 
-    ols_performance = calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ols)
-    ratio_performance = calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ratio)
+    # Calculate returns for each signal type
+    strategy_returns = pd.DataFrame({
+        'Mean_Reversion': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ols),
+        'MA_Crossover': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ma),
+        'Bollinger': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_bb),
+        'RSI': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_rsi),
+        'Combined': calculate_pair_returns(stock1['Close'], stock2['Close'], combined_signals)
+    })
 
+    # Save performance metrics
     with open(os.path.join(output_dir, 'performance.txt'), 'w') as f:
-        f.write("Strategy Performance:\n")
-        f.write(f"OLS Strategy Final Return: {ols_performance.iloc[-1]:.4f}\n")
-        f.write(f"Ratio Strategy Final Return: {ratio_performance.iloc[-1]:.4f}\n")
+        f.write("Strategy Performance:\n\n")
+        for strategy in strategy_returns.columns:
+            final_return = strategy_returns[strategy].iloc[-1]
+            sharpe = np.sqrt(252) * (strategy_returns[strategy].diff().mean() /
+                                   strategy_returns[strategy].diff().std())
+            f.write(f"{strategy} Strategy:\n")
+            f.write(f"Final Return: {final_return:.4f}\n")
+            f.write(f"Sharpe Ratio: {sharpe:.4f}\n\n")
 
-    fig1 = make_subplots(rows=1, cols=1)
-    fig1.add_trace(go.Scatter(x=results.index, y=results['AAPL'], name='AAPL'))
-    fig1.add_trace(go.Scatter(x=results.index, y=results['MSFT'], name='MSFT'))
-    fig1.update_layout(title="Price Series", height=600)
-    fig1.write_html(os.path.join(output_dir, 'price_series.html'))
+    # Create visualizations
+    # Price series with signals
+    fig1 = make_subplots(rows=2, cols=1, subplot_titles=("Asset Prices", "Combined Signals"))
 
-    fig1_signals = make_subplots(rows=1, cols=1)
+    fig1.add_trace(go.Scatter(x=results.index, y=results['AAPL'], name='AAPL'), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=results.index, y=results['MSFT'], name='MSFT'), row=1, col=1)
+    fig1.add_trace(go.Scatter(x=results.index, y=combined_signals, name='Combined Signals'), row=2, col=1)
 
-    fig1_signals.add_trace(go.Scatter(
-        x=results.index,
-        y=results['AAPL'],
-        name='AAPL',
-        line=dict(color='blue')
-    ))
+    # Add signal markers for long/short positions
+    long_positions = combined_signals == 1
+    short_positions = combined_signals == -1
 
-    fig1_signals.add_trace(go.Scatter(
-        x=results.index,
-        y=results['MSFT'],
-        name='MSFT',
-        line=dict(color='purple')
-    ))
-
-    long_aapl = signals_ols == 1
-    short_aapl = signals_ols == -1
-
-    fig1_signals.add_trace(go.Scatter(
-        x=results.index[long_aapl],
-        y=results.loc[long_aapl, 'AAPL'],
+    fig1.add_trace(go.Scatter(
+        x=results.index[long_positions],
+        y=results.loc[long_positions, 'AAPL'],
         mode='markers',
         name='Long AAPL',
-        marker=dict(
-            symbol='triangle-up',
-            size=12,
-            color='green',
-            line=dict(width=1)
-        )
-    ))
+        marker=dict(symbol='triangle-up', size=10, color='green')
+    ), row=1, col=1)
 
-    fig1_signals.add_trace(go.Scatter(
-        x=results.index[short_aapl],
-        y=results.loc[short_aapl, 'AAPL'],
+    fig1.add_trace(go.Scatter(
+        x=results.index[short_positions],
+        y=results.loc[short_positions, 'AAPL'],
         mode='markers',
         name='Short AAPL',
-        marker=dict(
-            symbol='triangle-down',
-            size=12,
-            color='red',
-            line=dict(width=1)
-        )
-    ))
+        marker=dict(symbol='triangle-down', size=10, color='red')
+    ), row=1, col=1)
 
-    fig1_signals.add_trace(go.Scatter(
-        x=results.index[long_aapl],
-        y=results.loc[long_aapl, 'MSFT'],
-        mode='markers',
-        name='Short MSFT',
-        marker=dict(
-            symbol='triangle-down',
-            size=12,
-            color='red',
-            line=dict(width=1)
-        )
-    ))
+    fig1.update_layout(height=800, title_text="Pairs Trading Analysis")
+    fig1.write_html(os.path.join(output_dir, 'trading_signals.html'))
 
-    fig1_signals.add_trace(go.Scatter(
-        x=results.index[short_aapl],
-        y=results.loc[short_aapl, 'MSFT'],
-        mode='markers',
-        name='Long MSFT',
-        marker=dict(
-            symbol='triangle-up',
-            size=12,
-            color='green',
-            line=dict(width=1)
-        )
-    ))
+    # Create spread visualization
+    fig2 = make_subplots(rows=2, cols=1, subplot_titles=("OLS Spread", "Signals Comparison"))
 
-    fig1_signals.update_layout(
-        title="Pairs Trading Signals",
-        height=800,
-        yaxis_title="Price",
-        xaxis_title="Date",
-        showlegend=True,
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="left",
-            x=0.01
-        )
-    )
-    fig1_signals.write_html(os.path.join(output_dir, 'price_series_with_signals.html'))
+    fig2.add_trace(go.Scatter(x=results.index, y=ols_spread, name='OLS Spread'), row=1, col=1)
 
-    fig2 = make_subplots(rows=1, cols=1)
-    fig2.add_trace(go.Scatter(x=results.index, y=results['OLS_Spread'], name='OLS Spread'))
-    fig2.add_trace(go.Scatter(x=results.index, y=results['Ratio_Spread'], name='Ratio Spread'))
-    fig2.update_layout(title="Spreads", height=600)
-    fig2.write_html(os.path.join(output_dir, 'spreads.html'))
+    # Add Bollinger Bands
+    roll_mean = ols_spread.rolling(window=20).mean()
+    roll_std = ols_spread.rolling(window=20).std()
+    upper_band = roll_mean + (2 * roll_std)
+    lower_band = roll_mean - (2 * roll_std)
 
-    fig3 = make_subplots(rows=1, cols=1)
-    fig3.add_trace(go.Scatter(x=results.index, y=signals_ols, name='OLS Signals'))
-    fig3.add_trace(go.Scatter(x=results.index, y=signals_ratio, name='Ratio Signals'))
-    fig3.update_layout(title="Trading Signals", height=600)
-    fig3.write_html(os.path.join(output_dir, 'signals.html'))
+    fig2.add_trace(go.Scatter(x=results.index, y=upper_band, name='Upper BB',
+                             line=dict(dash='dash')), row=1, col=1)
+    fig2.add_trace(go.Scatter(x=results.index, y=lower_band, name='Lower BB',
+                             line=dict(dash='dash')), row=1, col=1)
 
-    fig4 = make_subplots(rows=1, cols=1)
-    fig4.add_trace(go.Scatter(x=results.index, y=ols_performance, name='OLS Strategy'))
-    fig4.add_trace(go.Scatter(x=results.index, y=ratio_performance, name='Ratio Strategy'))
-    fig4.update_layout(title="Cumulative Returns", height=600)
-    fig4.write_html(os.path.join(output_dir, 'performance.html'))
+    # Add different signals for comparison
+    fig2.add_trace(go.Scatter(x=results.index, y=signals_ols, name='Mean Reversion'), row=2, col=1)
+    fig2.add_trace(go.Scatter(x=results.index, y=signals_ma, name='MA Crossover'), row=2, col=1)
+    fig2.add_trace(go.Scatter(x=results.index, y=signals_bb, name='Bollinger'), row=2, col=1)
+    fig2.add_trace(go.Scatter(x=results.index, y=signals_rsi, name='RSI'), row=2, col=1)
 
-    print(f"\nResults saved to {output_dir}")
-    return results, model
+    fig2.update_layout(height=800, title_text="Spread Analysis and Signal Comparison")
+    fig2.write_html(os.path.join(output_dir, 'spread_analysis.html'))
+
+    # Create returns visualization
+    fig3 = go.Figure()
+    for strategy in strategy_returns.columns:
+        fig3.add_trace(go.Scatter(x=results.index,
+                                 y=strategy_returns[strategy],
+                                 name=strategy))
+
+    fig3.update_layout(title="Cumulative Strategy Returns",
+                      xaxis_title="Date",
+                      yaxis_title="Cumulative Return",
+                      height=600)
+    fig3.write_html(os.path.join(output_dir, 'strategy_returns.html'))
+
+    print(f"\nResults and visualizations saved to {output_dir}")
+    return results, model, strategy_returns
 
 if __name__ == "__main__":
-    results, model = main()
+    results, model, strategy_returns = main()

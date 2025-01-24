@@ -6,6 +6,7 @@ from plotly.subplots import make_subplots
 import io
 from typing import Dict, List, Tuple
 
+from config.logging_config import logger
 from src.strategy.backtest import MultiPairBackTester
 from src.strategy.risk import PairRiskManager
 from src.strategy.pairs_strategy_SL import EnhancedStatPairsStrategy
@@ -43,16 +44,21 @@ class EnhancedStrategyBuilder:
                 backtest_params=backtest_params
             )
 
-        if 'backtest_results' in st.session_state:
-            self._display_backtest_results()
+            if 'backtest_results' in st.session_state and st.session_state['backtest_results'] is not None:
+                if 'metrics' in st.session_state['backtest_results']:
+                    self._display_backtest_results()
+                else:
+                    st.error("Backtest completed but no metrics were generated. Please check the logs for details.")
+
+        elif 'backtest_results' in st.session_state and st.session_state['backtest_results'] is not None:
+            if st.checkbox("Show Previous Backtest Results", value=False):
+                if 'metrics' in st.session_state['backtest_results']:
+                    self._display_backtest_results()
+                else:
+                    st.error("Previous backtest results are invalid. Please run a new backtest.")
 
     def _render_strategy_selection(self) -> Dict:
-        """
-        Render strategy selection and configuration interface.
-
-        Returns:
-            Dict: Strategy configuration parameters
-        """
+        """Render strategy selection and configuration interface."""
         st.subheader("Strategy Configuration")
 
         strategy_type = st.selectbox(
@@ -63,31 +69,44 @@ class EnhancedStrategyBuilder:
         params = {}
 
         if strategy_type == "Statistical":
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
+
             with col1:
+                st.markdown("### Core Parameters")
                 params.update({
-                    'zscore_threshold': st.number_input(
-                        "Z-Score Threshold",
+                    'lookback_window': st.number_input(
+                        "Lookback Window (days)",
+                        min_value=10,
+                        max_value=252,
+                        value=252
+                    ),
+                    'zscore_entry': st.number_input(
+                        "Z-Score Entry",
                         min_value=0.0,
                         max_value=5.0,
                         value=2.0,
                         step=0.1
                     ),
-                    'lookback_window': st.number_input(
-                        "Lookback Window (days)",
-                        min_value=10,
-                        max_value=252,
-                        value=63
+                    'zscore_exit': st.number_input(
+                        "Z-Score Exit",
+                        min_value=0.0,
+                        max_value=5.0,
+                        value=0.5,
+                        step=0.1
+                    ),
+                    'coint_threshold': st.number_input(
+                        "Cointegration Threshold",
+                        min_value=0.01,
+                        max_value=0.10,
+                        value=0.05,
+                        step=0.01,
+                        help="Maximum p-value for cointegration test"
                     )
                 })
+
             with col2:
+                st.markdown("### Trading Parameters")
                 params.update({
-                    'zscore_window': st.number_input(
-                        "Z-Score Window (days)",
-                        min_value=5,
-                        max_value=126,
-                        value=21
-                    ),
                     'min_half_life': st.number_input(
                         "Min Half-Life (days)",
                         min_value=1,
@@ -99,6 +118,99 @@ class EnhancedStrategyBuilder:
                         min_value=64,
                         max_value=252,
                         value=126
+                    ),
+                    'max_spread_vol': st.number_input(
+                        "Max Spread Volatility",
+                        min_value=0.01,
+                        max_value=1.0,
+                        value=0.1,
+                        step=0.01
+                    ),
+                    'min_correlation': st.number_input(
+                        "Min Correlation",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.5,
+                        step=0.1
+                    )
+                })
+
+            with col3:
+                st.markdown("### Risk Parameters")
+                params.update({
+                    'max_pairs': st.number_input(
+                        "Maximum Pairs",
+                        min_value=1,
+                        max_value=50,
+                        value=10
+                    ),
+                    'position_size': st.number_input(
+                        "Position Size",
+                        min_value=0.01,
+                        max_value=1.0,
+                        value=0.1,
+                        step=0.01
+                    ),
+                    'stop_loss': st.number_input(
+                        "Stop Loss",
+                        min_value=0.01,
+                        max_value=0.1,
+                        value=0.02,
+                        step=0.01
+                    ),
+                    'max_drawdown': st.number_input(
+                        "Max Drawdown",
+                        min_value=0.05,
+                        max_value=0.5,
+                        value=0.2,
+                        step=0.01
+                    )
+                })
+
+            st.markdown("### Advanced Parameters")
+            col4, col5 = st.columns(2)
+
+            with col4:
+                params.update({
+                    'cointegration_windows': st.multiselect(
+                        "Cointegration Windows",
+                        options=[21, 63, 126, 252],
+                        default=[63, 126, 252]
+                    ),
+                    'min_votes': st.number_input(
+                        "Minimum Cointegration Votes",
+                        min_value=1,
+                        max_value=3,
+                        value=2
+                    ),
+                    'regime_adaptation': st.checkbox(
+                        "Enable Regime Adaptation",
+                        value=True
+                    )
+                })
+
+            with col5:
+                params.update({
+                    'close_on_signal_flip': st.checkbox(
+                        "Close on Signal Flip",
+                        value=True
+                    ),
+                    'signal_exit_threshold': st.number_input(
+                        "Signal Exit Threshold",
+                        min_value=0.1,
+                        max_value=1.0,
+                        value=0.3,
+                        step=0.1
+                    ),
+                    'confirmation_periods': st.number_input(
+                        "Confirmation Periods",
+                        min_value=1,
+                        max_value=5,
+                        value=2
+                    ),
+                    'close_on_regime_change': st.checkbox(
+                        "Close on Regime Change",
+                        value=True
                     )
                 })
 
@@ -301,7 +413,7 @@ class EnhancedStrategyBuilder:
         """
         try:
             with st.spinner("Running backtest..."):
-                returns = self._get_returns_data()
+                prices = self._get_price_data()
                 pairs = self._get_selected_pairs()
 
                 strategy = self._create_strategy(
@@ -310,7 +422,7 @@ class EnhancedStrategyBuilder:
                 )
 
                 if hasattr(strategy, 'set_tradeable_pairs'):
-                    strategy.set_tradeable_pairs(pairs)
+                    strategy.set_tradeable_pairs(pairs) # can be easily implemented but unecessary for now
                 else:
                     strategy.pairs = pairs
 
@@ -324,7 +436,7 @@ class EnhancedStrategyBuilder:
 
                 backtester = MultiPairBackTester(
                     strategy=strategy,
-                    returns=returns,
+                    prices=prices,
                     initial_capital=backtest_params['initial_capital'],
                     risk_manager=risk_manager,
                     transaction_cost=backtest_params['transaction_cost'],
@@ -349,6 +461,33 @@ class EnhancedStrategyBuilder:
 
         except Exception as e:
             st.error(f"Error running backtest: {str(e)}")
+            logger.error(f"Backtest error: {str(e)}", exc_info=True)
+
+    def _get_price_data(self) -> pd.DataFrame:
+        """
+        Get price data from session state.
+
+        Returns:
+            pd.DataFrame: Price data for analysis
+        """
+        if 'historical_data' not in st.session_state:
+            raise ValueError("No historical data found in session state")
+
+        data = st.session_state['historical_data']
+
+        if 'Date' not in data.columns or 'Symbol' not in data.columns or 'Adj_Close' not in data.columns:
+            raise ValueError("Required columns missing in historical data")
+
+        prices = data.pivot(
+            index='Date',
+            columns='Symbol',
+            values='Adj_Close'
+        )
+
+        prices = prices.sort_index()
+        prices = prices.ffill().bfill()
+
+        return prices
 
     def _get_selected_pairs(self) -> List[Tuple[str, str]]:
         """
@@ -376,13 +515,18 @@ class EnhancedStrategyBuilder:
                         if len(assets) == 2:
                             asset1, asset2 = str(assets[0]), str(assets[1])
                             validated_pairs.append((min(asset1, asset2), max(asset1, asset2)))
+                    elif isinstance(pair, tuple):
+                        if len(pair) == 2:
+                            asset1, asset2 = str(pair[0]), str(pair[1])
+                            validated_pairs.append((asset1, asset2))
 
             if not validated_pairs:
                 raise ValueError("Could not extract valid pairs from selected pairs data")
 
             if 'historical_data' in st.session_state:
                 data = st.session_state['historical_data']
-                available_tickers = set(data['ticker'].unique())
+                # print(data)
+                available_tickers = set(data['Symbol'].unique())
 
                 valid_pairs = [
                     pair for pair in validated_pairs
@@ -394,44 +538,201 @@ class EnhancedStrategyBuilder:
 
                 return valid_pairs
 
+            # print(validated_pairs)
             return validated_pairs
 
         except Exception as e:
             raise ValueError(f"Error validating pairs: {str(e)}")
 
     def _create_strategy(self, strategy_type: str, params: Dict):
-        """Create strategy instance based on type and parameters."""
-        if strategy_type == "Statistical":
-            return EnhancedStatPairsStrategy(
-                lookback_window=params['lookback_window'],
-                zscore_entry=params['zscore_threshold'],
-                zscore_exit=params['zscore_threshold'] * 0.5,
-                min_half_life=params['min_half_life'],
-                max_half_life=params['max_half_life'],
-                max_spread_vol=0.1,
-                min_correlation=0.5
-            )
+        """Create and initialize strategy with separate models for each pair."""
+        try:
+            train_data, test_data = self._get_train_test_data()
+            pairs = self._get_selected_pairs()
 
-        elif strategy_type == "Machine Learning":
-            return MLPairsStrategy(
-                initial_capital=1_000_000.0,
-                lookback_window=max(params['lookback_windows']),
-                model_confidence_threshold=0.6,
-                zscore_threshold=params['zscore_threshold'],
-            )
+            if strategy_type == "Statistical":
+                strategy = EnhancedStatPairsStrategy(
+                    lookback_window=params['lookback_window'],
+                    zscore_entry=params['zscore_entry'],
+                    zscore_exit=params['zscore_exit'],
+                    min_half_life=params['min_half_life'],
+                    max_half_life=params['max_half_life'],
+                    max_spread_vol=params['max_spread_vol'],
+                    min_correlation=params['min_correlation'],
+                    coint_threshold=params['coint_threshold'],
+                    max_pairs=params['max_pairs'],
+                    position_size=params['position_size'],
+                    stop_loss=params['stop_loss'],
+                    max_drawdown=params['max_drawdown'],
+                    cointegration_windows=params['cointegration_windows'],
+                    min_votes=params['min_votes'],
+                    regime_adaptation=params['regime_adaptation'],
+                    close_on_signal_flip=params['close_on_signal_flip'],
+                    signal_exit_threshold=params['signal_exit_threshold'],
+                    confirmation_periods=params['confirmation_periods'],
+                    close_on_regime_change=params['close_on_regime_change']
+                )
+                strategy.pairs = pairs
+                return strategy
 
+            elif strategy_type == "Machine Learning":
+                strategy = MLPairsStrategy(
+                    initial_capital=1_000_000.0,
+                    lookback_window=max(params['lookback_windows']),
+                    model_confidence_threshold=params.get('model_confidence_threshold', 0.6),
+                    zscore_threshold=params['zscore_threshold'],
+                    max_position_size=0.1,
+                    stop_loss=0.02,
+                    take_profit=0.04,
+                )
+                strategy.pairs = pairs
+
+                with st.spinner("Training ML models for each pair..."):
+                    progress_bar = st.progress(0)
+                    for i, pair in enumerate(pairs):
+                        progress = (i + 1) / len(pairs)
+                        progress_bar.progress(progress)
+                        st.write(f"Training model for pair {pair[0]}/{pair[1]}...")
+
+                        pair_data = train_data[[pair[0], pair[1]]]
+
+                        try:
+                            strategy.initialize_models(pair_data)
+                            st.write(f"✓ Successfully trained model for {pair[0]}/{pair[1]}")
+                        except Exception as e:
+                            st.error(f"Failed to train model for {pair[0]}/{pair[1]}: {str(e)}")
+                            continue
+
+                return strategy
+
+            else:
+                strategy = PairsTradingDL(
+                    sequence_length=params['sequence_length'],
+                    prediction_horizon=params['prediction_horizon'],
+                    zscore_threshold=params['zscore_threshold'],
+                    min_confidence=0.6,
+                    max_position_size=0.1,
+                )
+
+                strategy.pairs = pairs
+
+                with st.spinner("Training DL models for each pair..."):
+                    progress_bar = st.progress(0)
+                    for i, pair in enumerate(pairs):
+                        progress = (i + 1) / len(pairs)
+                        progress_bar.progress(progress)
+                        st.write(f"Training deep learning models for pair {pair[0]}/{pair[1]}...")
+
+                        pair_data = train_data[[pair[0], pair[1]]]
+
+                        try:
+                            strategy.initialize_models(pair_data)
+                            st.write(f"✓ Successfully trained models for {pair[0]}/{pair[1]}")
+                        except Exception as e:
+                            st.error(f"Failed to train models for {pair[0]}/{pair[1]}: {str(e)}")
+                            continue
+
+                return strategy
+
+        except Exception as e:
+            st.error(f"Error creating strategy: {str(e)}")
+            raise
+
+    def _get_train_test_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Get training and test data from session state and perform proper splitting.
+        All tickers are split at the same time point to maintain pair relationships.
+
+        Returns:
+            Tuple[pd.DataFrame, pd.DataFrame]: Training and test price data
+        """
+        if 'historical_data' not in st.session_state:
+            raise ValueError("No historical data found in session state")
+
+        data = st.session_state['historical_data']
+
+        data['Date'] = pd.to_datetime(data['Date'])
+        unique_tickers = data['Symbol'].unique()
+
+        ticker_dates = {}
+        for ticker in unique_tickers:
+            ticker_data = data[data['Symbol'] == ticker]
+            ticker_dates[ticker] = (ticker_data['Date'].min(), ticker_data['Date'].max())
+
+        start_date = max(dates[0] for dates in ticker_dates.values())
+        end_date = min(dates[1] for dates in ticker_dates.values())
+
+        data = data[
+            (data['Date'] >= start_date) &
+            (data['Date'] <= end_date)
+            ]
+
+        prices = data.pivot(
+            index='Date',
+            columns='Symbol',
+            values='Adj_Close'
+        )
+
+        prices = prices.sort_index()
+
+        prices = prices.ffill().bfill()
+
+        if ('strategy_params' in st.session_state and
+                isinstance(st.session_state['strategy_params'], dict) and
+                'train_size' in st.session_state['strategy_params']):
+            train_days = st.session_state['strategy_params']['train_size']
+            train_size = min(train_days, int(len(prices) * 0.8))
         else:
-            return PairsTradingDL(
-                sequence_length=params['sequence_length'],
-                prediction_horizon=params['prediction_horizon'],
-                zscore_threshold=params['zscore_threshold'],
-                min_confidence=0.6,
-                max_position_size=0.1,
+            train_size = int(len(prices) * 0.7)
+
+        min_train_size = 100
+        min_test_size = 20
+
+        if len(prices) < (min_train_size + min_test_size):
+            raise ValueError(
+                f"Insufficient data. Need at least {min_train_size + min_test_size} "
+                f"periods, but only have {len(prices)}"
             )
+
+        train_data = prices.iloc[:train_size]
+        test_data = prices.iloc[train_size:]
+
+        logger.info(
+            f"Data split created - Training: {len(train_data)} periods "
+            f"({train_data.index[0]} to {train_data.index[-1]}), "
+            f"Testing: {len(test_data)} periods "
+            f"({test_data.index[0]} to {test_data.index[-1]})"
+        )
+
+        missing_data = {
+            ticker: train_data[ticker].isna().sum() + test_data[ticker].isna().sum()
+            for ticker in prices.columns
+        }
+
+        if any(missing_data.values()):
+            missing_tickers = {k: v for k, v in missing_data.items() if v > 0}
+            logger.warning(f"Missing data in tickers: {missing_tickers}")
+            st.warning(
+                "Some tickers have missing data. This might affect model performance. "
+                f"Affected tickers: {list(missing_tickers.keys())}"
+            )
+
+        return train_data, test_data
 
     def _display_backtest_results(self):
         """Display comprehensive backtest results."""
+
+        if ('backtest_results' not in st.session_state or
+                st.session_state['backtest_results'] is None or
+                'metrics' not in st.session_state['backtest_results']):
+            return
+
         results = st.session_state['backtest_results']
+
+        if results is None or 'metrics' not in results:
+            st.error("No valid backtest results available. Please run the backtest first.")
+            return
+
 
         self._display_summary_metrics(results['metrics'])
 
@@ -915,9 +1216,9 @@ class EnhancedStrategyBuilder:
 
         data = st.session_state['historical_data']
         prices = data.pivot(
-            index='date',
-            columns='ticker',
-            values='adj_close'
+            index='Date',
+            columns='Symbol',
+            values='Adj_Close'
         )
         returns = prices.pct_change().dropna()
         return returns

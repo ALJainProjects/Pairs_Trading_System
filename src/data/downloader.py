@@ -106,11 +106,24 @@ class DataDownloader:
 
         failed_symbols = []
         all_data = []
+        raw_dir = RAW_DATA_DIR.replace(r'\config', '')
 
         for symbol in tqdm(symbols, desc="Downloading data"):
             try:
-                symbol_data = self._download_symbol(symbol, start_date, end_date)
-                all_data.append(symbol_data)
+                file_path = os.path.join(raw_dir, f"{symbol}.csv")
+                try:
+                    logger.info(f"Checking for existing data at: {file_path}")
+                    symbol_data = pd.read_csv(file_path)
+                    all_data.append(symbol_data)
+                    logger.info(f"Successfully loaded existing data for {symbol}")
+                except Exception:
+                    logger.warning(f"Data does not exist already. Downloading Data for {symbol} now.")
+                    symbol_data = self._download_symbol(symbol, start_date, end_date)
+                    if not symbol_data.empty:
+                        all_data.append(symbol_data)
+                    else:
+                        logger.error(f"Failed to download {symbol}.")
+                        failed_symbols.append(symbol)
             except Exception as e:
                 logger.error(f"Failed to download {symbol}: {str(e)}")
                 failed_symbols.append(symbol)
@@ -130,7 +143,7 @@ class DataDownloader:
     def _download_symbol(self,
                          symbol: str,
                          start_date: datetime,
-                         end_date: datetime) -> None:
+                         end_date: datetime) -> pd.DataFrame:
         """
         Download data for a single symbol and save it as {symbol}.csv.
 
@@ -143,7 +156,7 @@ class DataDownloader:
 
         if df.empty:
             logger.warning(f"No data found for {symbol}")
-            return
+            return pd.DataFrame()
 
         df.reset_index(inplace=True)
         df['Symbol'] = symbol
@@ -191,7 +204,7 @@ def main():
         logger.info("Downloading historical data...")
         downloader.download_historical_data(
             symbols,
-            years_back=4
+            years_back=10
         )
 
     except Exception as e:

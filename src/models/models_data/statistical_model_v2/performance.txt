@@ -1,0 +1,22 @@
+Strategy Performance:
+
+Mean_Reversion Strategy:
+Final Return: 0.5250
+Sharpe Ratio: 0.5848
+
+MA_Crossover Strategy:
+Final Return: -0.0186
+Sharpe Ratio: -0.0086
+
+Bollinger Strategy:
+Final Return: 0.5250
+Sharpe Ratio: 0.5848
+
+RSI Strategy:
+Final Return: -0.1296
+Sharpe Ratio: -0.1220
+
+Combined Strategy:
+Final Return: 0.0173
+Sharpe Ratio: 0.0408
+

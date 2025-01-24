@@ -33,10 +33,11 @@ class StreamlitOptimizationApp:
     def _load_config(self) -> Dict:
         """Load application configuration."""
         try:
-            with open('config/optimization_config.json', 'r') as f:
-                return json.load(f)
+            # with open('config/optimization_config.json', 'r') as f:
+                # return json.load(f)
+            raise
         except Exception as e:
-            logger.warning(f"Failed to load config: {e}")
+            logger.warning(f"Failed to load config: {e}. Reverting to default.")
             return {
                 'default_trials': 100,
                 'max_trials': 500,

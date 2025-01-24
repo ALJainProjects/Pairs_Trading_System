@@ -88,12 +88,10 @@ class PairsTrader(BaseStrategy):
         self.validate_parameters()
         self._portfolio_value = 0.0
 
-    @property.fget
     def get_current_portfolio_value(self) -> float:
         """Get current portfolio value."""
         return self._portfolio_value
 
-    @property.fset
     def set_current_portfolio_value(self, value: float) -> None:
         """Set current portfolio value."""
         self._portfolio_value = value
@@ -177,6 +175,13 @@ class PairsTrader(BaseStrategy):
 
                         logger.info(f"Found cointegrated pair: {asset1}-{asset2} "
                                   f"(p-value: {p_value:.4f}, hedge ratio: {hedge_ratio:.4f})")
+                    else:
+                        hedge_ratio = self.calculate_hedge_ratio(
+                            prices[asset1],
+                            prices[asset2]
+                        )
+                        cointegrated_pairs.append((asset1, asset2))
+                        self.hedge_ratios[(asset1, asset2)] = hedge_ratio
 
                 except Exception as e:
                     logger.warning(f"Error testing cointegration for {asset1}-{asset2}: {str(e)}")

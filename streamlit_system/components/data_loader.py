@@ -9,6 +9,7 @@ from src.data.downloader import DataDownloader
 from src.data.preprocessor import Preprocessor
 from src.data.database import DatabaseManager
 from src.utils.validation import validate_dataframe
+from config.logging_config import logger
 
 
 class EnhancedDataLoader:
@@ -66,7 +67,7 @@ class EnhancedDataLoader:
                     dfs = []
                     for file in uploaded_files:
                         df = pd.read_csv(file)
-                        df['ticker'] = file.name.split('.')[0]
+                        df['Symbol'] = file.name.split('.')[0]
                         dfs.append(df)
 
                     combined_df = pd.concat(dfs, ignore_index=True)
@@ -98,12 +99,14 @@ class EnhancedDataLoader:
         with col1:
             start_date = st.date_input(
                 "Start Date",
-                datetime.now() - timedelta(days=365 * 2)
+                datetime.now() - timedelta(days=365 * 2),
+                key='Start Date Direct Download'
             )
         with col2:
             end_date = st.date_input(
                 "End Date",
-                datetime.now()
+                datetime.now(),
+                key='End Date Direct Download'
             )
 
         if tickers:
@@ -136,9 +139,29 @@ class EnhancedDataLoader:
         try:
             url = 'https://www.ssga.com/us/en/intermediary/etfs/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx'
             holdings = pd.read_excel(url, engine='openpyxl', skiprows=4)
-            return holdings['Ticker'].dropna().tolist()
+
+            if 'Ticker' in holdings.columns:
+                tickers = holdings['Ticker'].dropna().tolist()
+            elif 'Symbol' in holdings.columns:
+                tickers = holdings['Symbol'].dropna().tolist()
+            else:
+                potential_ticker_cols = [col for col in holdings.columns
+                                         if any(x in col.lower() for x in ['ticker', 'symbol'])]
+                if potential_ticker_cols:
+                    tickers = holdings[potential_ticker_cols[0]].dropna().tolist()
+                else:
+                    raise ValueError("Could not find ticker column in S&P 500 data")
+
+            tickers = [str(ticker).strip().upper() for ticker in tickers]
+            tickers = [ticker for ticker in tickers if ticker.isalnum()]
+
+            if not tickers:
+                raise ValueError("No valid tickers found in S&P 500 data")
+
+            return tickers
         except Exception as e:
             st.error(f"Error fetching S&P 500 components: {str(e)}")
+            logger.error(f"S&P 500 fetch error: {str(e)}", exc_info=True)
             return []
 
     def _handle_ticker_input(self, input_method: str) -> List[str]:
@@ -186,14 +209,8 @@ class EnhancedDataLoader:
 
         return tickers
 
-    def _handle_data_download(
-            self,
-            tickers: List[str],
-            start_date: datetime,
-            end_date: datetime,
-            batch_size: int,
-            include_validation: bool
-    ):
+    def _handle_data_download(self, tickers: List[str], start_date: datetime, end_date: datetime, batch_size: int,
+                              include_validation: bool):
         """Handle the data download process with proper state management."""
         try:
             with st.spinner("Downloading market data..."):
@@ -204,14 +221,27 @@ class EnhancedDataLoader:
                 )
 
                 if df is not None and not df.empty:
+                    if isinstance(df.index, pd.DatetimeIndex):
+                        df = df.reset_index()
+                        df.rename(columns={'index': 'Date'}, inplace=True)
+
+                    df.columns = [col.strip() for col in df.columns]
+
+                    column_mapping = {
+                        'adj close': 'Adj_Close',
+                        'adjusted close': 'Adj_Close',
+                        'adjusted_close': 'Adj_Close',
+                        'datetime': 'Date',
+                        'time': 'Date'
+                    }
+                    df.rename(columns=column_mapping, inplace=True)
+
                     if include_validation:
                         df = self._process_data(df)
 
                     self._store_data(df)
-
                     st.session_state.data_loading_success = True
                     st.session_state.data_loading_error = None
-
                     self._display_data_summary(df)
                 else:
                     st.session_state.data_loading_error = "No data was downloaded. Please check your inputs."
@@ -220,7 +250,7 @@ class EnhancedDataLoader:
         except Exception as e:
             st.session_state.data_loading_error = f"Error downloading data: {str(e)}"
             st.session_state.data_loading_success = False
-            st.error(traceback.format_exc())
+            logger.error(f"Download error: {str(e)}", exc_info=True)
 
     def _render_database_query(self):
         """Handle database queries with improved state management."""
@@ -234,13 +264,15 @@ class EnhancedDataLoader:
             )
             min_date = st.date_input(
                 "Start Date",
-                datetime.now() - timedelta(days=365)
+                datetime.now() - timedelta(days=365),
+                key='Start Date Database Query'
             )
 
         with col2:
             max_date = st.date_input(
                 "End Date",
-                datetime.now()
+                datetime.now(),
+                key='End Date Database Query'
             )
 
         if st.button("Query Database"):
@@ -279,7 +311,7 @@ class EnhancedDataLoader:
             st.warning("Data validation warnings detected. See logs for details.")
 
         df = self.preprocessor.clean_data(df)
-        df = self.preprocessor.normalize_data(df, method="z-score")
+        # df = self.preprocessor.normalize_data(df, method="z-score")
         df = self.preprocessor.handle_outliers(df)
 
         return df
@@ -303,8 +335,8 @@ class EnhancedDataLoader:
 
         st.session_state.historical_data = df.copy()
 
-        for ticker in df['ticker'].unique():
-            ticker_data = df[df['ticker'] == ticker].copy()
+        for ticker in df['Symbol'].unique():
+            ticker_data = df[df['Symbol'] == ticker].copy()
             self.db_manager.insert_historical_data(ticker, ticker_data)
 
     def _display_data_summary(self, df: pd.DataFrame):
@@ -312,16 +344,16 @@ class EnhancedDataLoader:
         st.subheader("Data Summary")
 
         col1, col2, col3 = st.columns(3)
-        col1.metric("Number of Tickers", len(df['ticker'].unique()))
-        col2.metric("Date Range", f"{df['date'].min():%Y-%m-%d} to {df['date'].max():%Y-%m-%d}")
+        col1.metric("Number of Tickers", len(df['Symbol'].unique()))
+        col2.metric("Date Range", f"{df['Date'].min():%Y-%m-%d} to {df['Date'].max():%Y-%m-%d}")
         col3.metric("Total Records", len(df))
 
         fig = go.Figure()
-        for ticker in df['ticker'].unique()[:5]:
-            ticker_data = df[df['ticker'] == ticker]
+        for ticker in df['Symbol'].unique()[:5]:
+            ticker_data = df[df['Symbol'] == ticker]
             fig.add_trace(go.Scatter(
-                x=ticker_data['date'],
-                y=ticker_data['adj_close'],
+                x=ticker_data['Date'],
+                y=ticker_data['Adj_Close'],
                 name=ticker,
                 mode='lines'
             ))
@@ -341,13 +373,14 @@ class EnhancedDataLoader:
     def _calculate_quality_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate data quality metrics per ticker."""
         metrics = []
-        for ticker in df['ticker'].unique():
-            ticker_data = df[df['ticker'] == ticker]
+        df = df.copy()
+        for ticker in df['Symbol'].unique():
+            ticker_data = df[df['Symbol'] == ticker]
             metrics.append({
                 'Ticker': ticker,
                 'Missing Values (%)': (ticker_data.isnull().sum().sum() / len(ticker_data)) * 100,
                 'Trading Days': len(ticker_data),
-                'Price Range': f"{ticker_data['adj_close'].min():.2f} - {ticker_data['adj_close'].max():.2f}",
-                'Avg Daily Volume': ticker_data['volume'].mean()
+                'Price Range': f"{ticker_data['Adj_Close'].min():.2f} - {ticker_data['Adj_Close'].max():.2f}",
+                'Avg Daily Volume': ticker_data['Volume'].mean()
             })
         return pd.DataFrame(metrics)

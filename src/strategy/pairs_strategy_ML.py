@@ -181,15 +181,13 @@ class MLPairsStrategy(BaseStrategy):
                 asset1, asset2 = pair
                 logger.info(f"Training model for pair {asset1}-{asset2}")
 
-                # Prepare features for the pair
                 features = self.ml_model.prepare_features(
                     price1=train_data[asset1],
                     price2=train_data[asset2],
-                    windows=[5, 20, 60],  # Multiple timeframes for better signals
+                    windows=[5, 20, 60],
                     lag_windows=[1, 2, 3, 5, 10]
                 )
 
-                # Create training labels
                 labels = self.ml_model.create_advanced_spread_labels(
                     price1=train_data[asset1],
                     price2=train_data[asset2],
@@ -197,10 +195,8 @@ class MLPairsStrategy(BaseStrategy):
                     zscore_threshold=self.zscore_threshold
                 )
 
-                # Ensure features and labels are aligned
                 features = features.loc[labels.index]
 
-                # Split data for training
                 X_train, X_val, y_train, y_val = train_test_split(
                     features,
                     labels,
@@ -208,7 +204,6 @@ class MLPairsStrategy(BaseStrategy):
                     shuffle=False
                 )
 
-                # Train model with cross-validation
                 metrics = time_series_cross_validation(
                     model=self.ml_model,
                     features=X_train,
@@ -219,7 +214,6 @@ class MLPairsStrategy(BaseStrategy):
 
                 logger.info(f"Cross-validation metrics for {asset1}-{asset2}: {metrics}")
 
-                # Final model training
                 model, train_metrics = self.ml_model.train_model(
                     X=features,
                     y=labels,

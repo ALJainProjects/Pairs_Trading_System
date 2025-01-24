@@ -1,0 +1,50 @@
+{
+    "default_trials": 100,
+    "max_trials": 500,
+    "metrics": [
+        "sharpe_ratio",
+        "sortino_ratio",
+        "total_return",
+        "max_drawdown",
+        "win_rate",
+        "profit_factor"
+    ],
+    "default_metric": "sharpe_ratio",
+    "save_results": true,
+    "output_dir": "optimization_results",
+    "optimization_settings": {
+        "methods": [
+            "bayesian",
+            "grid_search",
+            "random_search"
+        ],
+        "default_method": "bayesian",
+        "early_stopping": {
+            "enabled": true,
+            "patience": 20,
+            "min_delta": 0.001
+        },
+        "cross_validation": {
+            "enabled": true,
+            "n_splits": 5,
+            "shuffle": true
+        }
+    },
+    "parameter_constraints": {
+        "lookback_range": [10, 252],
+        "zscore_range": [1.0, 3.0],
+        "position_size_range": [0.01, 0.1],
+        "stop_loss_range": [0.02, 0.1],
+        "take_profit_range": [0.02, 0.15]
+    },
+    "logging": {
+        "level": "INFO",
+        "file_output": true,
+        "console_output": true
+    },
+    "resources": {
+        "max_memory": "8G",
+        "n_jobs": -1,
+        "use_gpu": false
+    }
+}

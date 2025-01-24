@@ -18,6 +18,9 @@ class PairTradingApp:
         self.strategy_builder = EnhancedStrategyBuilder()
         self.optimization = StreamlitOptimizationApp()
 
+        if 'backtest_results' not in st.session_state:
+            st.session_state['backtest_results'] = None
+
     def run(self):
         """Run the main application."""
         self._configure_page()
@@ -53,27 +56,44 @@ class PairTradingApp:
         return page
 
     def _display_session_status(self):
-        """Display the current session state status."""
+        """Display the current session state status with standardized column names."""
         if 'historical_data' in st.session_state:
             data = st.session_state['historical_data']
-            st.success(f"✅ Data loaded: {len(data['ticker'].unique())} tickers")
-            st.info(f"Date range: {data['date'].min():%Y-%m-%d} to {data['date'].max():%Y-%m-%d}")
+            if not data.empty:
+                data.columns = [col for col in data.columns]
+
+                if 'Symbol' not in data.columns and 'ticker' in data.columns:
+                    data['Symbol'] = data['ticker']
+
+                if 'Symbol' in data.columns:
+                    st.success(f"✅ Data loaded: {len(data['Symbol'].unique())} tickers")
+                    if 'Date' in data.columns:
+                        st.info(f"Date range: {data['Date'].min():%Y-%m-%d} to {data['Date'].max():%Y-%m-%d}")
+                else:
+                    st.warning("❌ Data loaded but ticker/symbol column not found")
+            else:
+                st.warning("❌ Empty dataset loaded")
         else:
             st.warning("❌ No data loaded")
 
         if 'selected_pairs' in st.session_state:
             pairs = st.session_state['selected_pairs']
-            st.success(f"✅ {len(pairs)} pairs selected")
+            if not pairs.empty:
+                st.success(f"✅ {len(pairs)} pairs selected")
+            else:
+                st.warning("❌ No pairs selected")
         else:
             st.warning("❌ No pairs selected")
 
         if 'backtest_results' in st.session_state:
             results = st.session_state['backtest_results']
-            st.success("✅ Strategy backtested")
-            if 'metrics' in results:
+            if results is not None and isinstance(results, dict) and 'metrics' in results:
+                st.success("✅ Strategy backtested")
                 metrics = results['metrics']
                 st.info(f"Sharpe Ratio: {metrics.get('Sharpe Ratio', 0):.2f}")
                 st.info(f"Total Return: {metrics.get('Total Return', 0):.1%}")
+            else:
+                st.warning("❌ Invalid or incomplete backtest results")
         else:
             st.warning("❌ No backtest results")
 
