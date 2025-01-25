@@ -62,34 +62,75 @@ class MarketRegimeDetector:
         self.window = window
         self.kmeans = KMeans(n_clusters=n_regimes)
 
-    def calculate_features(self, prices: pd.DataFrame) -> pd.DataFrame:
+    def calculate_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """Calculate regime detection features"""
-        returns = prices.pct_change()
-        features = pd.DataFrame(index=prices.index)
+        features = pd.DataFrame(index=data['Date'].unique())
 
-        features['volatility'] = returns.rolling(self.window).std()
+        returns_by_symbol = {}
+        for symbol in data['Symbol'].unique():
+            mask = data['Symbol'] == symbol
+            symbol_data = data[mask].sort_values('Date')
+            returns_by_symbol[symbol] = symbol_data['Adj_Close'].pct_change()
 
+        returns_matrix = pd.DataFrame(returns_by_symbol, index=features.index).fillna(0)
 
-        correlations = returns.rolling(self.window).corr()
-        features['avg_correlation'] = correlations.groupby(level=0).mean().mean(axis=1)
+        symbol_vols = pd.DataFrame()
+        for symbol in returns_matrix.columns:
+            symbol_vols[symbol] = returns_matrix[symbol].rolling(window=self.window).std()
+        features['volatility'] = symbol_vols.mean(axis=1)
+
+        def calculate_average_correlation(x):
+            if x.isnull().all().all():
+                return 0
+            corr_matrix = x.corr()
+            upper_tri = np.triu(corr_matrix.values, k=1)
+            valid_corrs = upper_tri[upper_tri != 0]
+            return np.mean(valid_corrs) if len(valid_corrs) > 0 else 0
+
+        correlations = []
+        for i in range(len(returns_matrix)):
+            if i >= self.window:
+                window_data = returns_matrix.iloc[i - self.window:i]
+                correlations.append(calculate_average_correlation(window_data))
+            else:
+                correlations.append(0)
+        features['avg_correlation'] = correlations
 
         def hurst(ts):
+            """Calculate Hurst exponent for time series"""
+            if len(ts) < 20:
+                return np.nan
             lags = range(2, min(len(ts) // 2, 20))
             tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
             reg = np.polyfit(np.log(lags), np.log(tau), 1)
             return reg[0]
 
-        features['trend_strength'] = returns.rolling(self.window).apply(
-            lambda x: hurst(x.dropna().values) if len(x.dropna()) > 20 else np.nan
-        )
+        symbol_trends = pd.DataFrame()
+        for symbol in returns_matrix.columns:
+            trends = []
+            symbol_returns = returns_matrix[symbol]
+            for i in range(len(symbol_returns)):
+                if i >= self.window:
+                    window_data = symbol_returns.iloc[i - self.window:i]
+                    trends.append(hurst(window_data.values))
+                else:
+                    trends.append(np.nan)
+            symbol_trends[symbol] = trends
 
-        return features.fillna(method='ffill')
+        features['trend_strength'] = symbol_trends.mean(axis=1)
+
+        return features.ffill().bfill()
 
     def detect_regime(self, features: pd.DataFrame) -> np.ndarray:
         """Detect market regime using clustering"""
         standardized = (features - features.mean()) / features.std()
-        regimes = self.kmeans.fit_predict(standardized.dropna())
-        return regimes
+        standardized = standardized.dropna()
+
+        if len(standardized) == 0:
+            return 'Unknown'
+
+        regimes = self.kmeans.fit_predict(standardized)
+        return regimes[-1]
 
     def classify_regime(self, regime_idx: int, features: pd.DataFrame) -> str:
         """Classify regime type based on characteristics"""
@@ -308,13 +349,21 @@ class EnhancedStatPairsStrategy(BaseStrategy):
         try:
             coint_score = sum(stats.cointegration_votes.values()) / len(stats.cointegration_votes)
 
-            returns1 = prices[pair[0]].pct_change()
-            returns2 = prices[pair[1]].pct_change()
-            rolling_corr = returns1.rolling(63).corr(returns2)
+            asset1, asset2 = pair
+            asset1_data = prices[prices['Symbol'] == asset1].sort_values('Date')
+            asset2_data = prices[prices['Symbol'] == asset2].sort_values('Date')
+
+            returns1 = asset1_data['Adj_Close'].pct_change()
+            returns2 = asset2_data['Adj_Close'].pct_change()
+
+            rolling_corr = pd.Series(index=returns1.index)
+            for i in range(63, len(returns1)):
+                rolling_corr.iloc[i] = returns1.iloc[i - 63:i].corr(returns2.iloc[i - 63:i])
+
             corr_stability = 1 - rolling_corr.std()
 
-            hl_score = 1 - abs(stats.half_life - np.mean([self.min_half_life, self.max_half_life])) / (self.max_half_life - self.min_half_life)
-
+            hl_score = 1 - abs(stats.half_life - np.mean([self.min_half_life, self.max_half_life])) / (
+                        self.max_half_life - self.min_half_life)
             vol_score = 1 - (stats.spread_vol / self.max_spread_vol)
 
             weights = {
@@ -325,10 +374,10 @@ class EnhancedStatPairsStrategy(BaseStrategy):
             }
 
             composite_score = (
-                weights['cointegration'] * coint_score +
-                weights['correlation'] * corr_stability +
-                weights['half_life'] * hl_score +
-                weights['volatility'] * vol_score
+                    weights['cointegration'] * coint_score +
+                    weights['correlation'] * corr_stability +
+                    weights['half_life'] * hl_score +
+                    weights['volatility'] * vol_score
             )
 
             return float(composite_score)
@@ -350,8 +399,9 @@ class EnhancedStatPairsStrategy(BaseStrategy):
             if not stats:
                 return {'asset1': 0.0, 'asset2': 0.0}
 
-            price1 = prices[asset1].iloc[-1]
-            price2 = prices[asset2].iloc[-1]
+            latest_prices = prices[prices['Date'] == prices['Date'].max()]
+            price1 = latest_prices[latest_prices['Symbol'] == asset1]['Adj_Close'].iloc[0]
+            price2 = latest_prices[latest_prices['Symbol'] == asset2]['Adj_Close'].iloc[0]
 
             pair_value = price1 + stats.hedge_ratio * price2
             base_position = self.position_size * signal
@@ -380,14 +430,14 @@ class EnhancedStatPairsStrategy(BaseStrategy):
 
     def generate_signals(self, prices: pd.DataFrame) -> Union[pd.DataFrame, Dict[Tuple[str, str], pd.Series]]:
         """Generate trading signals for pairs"""
-        signals = pd.DataFrame(index=prices.index, columns=self.pairs)
+        dates = prices['Date'].unique()
+        signals = pd.DataFrame(index=dates, columns=self.pairs)
 
         if not self.pairs:
             self.pairs = self.find_pairs(prices)
 
         if self.regime_adaptation:
             regime_features = self.regime_detector.calculate_features(prices)
-            self.current_regime = self.regime_detector.detect_regime(regime_features)
             current_regime_type = self.regime_detector.classify_regime(-1, regime_features)
 
             self.current_regime = RegimeMetrics(
@@ -395,57 +445,68 @@ class EnhancedStatPairsStrategy(BaseStrategy):
                 correlation=regime_features['avg_correlation'].iloc[-1],
                 trend_strength=regime_features['trend_strength'].iloc[-1],
                 regime_type=current_regime_type,
-                start_date=prices.index[-1]
+                start_date=prices['Date'].max()
             )
 
-        for pair in self.pairs:
-            try:
-                asset1, asset2 = pair
+        for date in dates:
+            date_mask = prices['Date'] <= date
+            historical_data = prices[date_mask]
 
-                votes = self.test_cointegration_multiple_periods(
-                    prices[asset1],
-                    prices[asset2]
-                )
+            for pair in self.pairs:
+                try:
+                    asset1, asset2 = pair
 
-                if sum(votes.values()) < self.min_votes:
-                    signals[pair] = 0
-                    continue
+                    asset1_data = historical_data[historical_data['Symbol'] == asset1]['Adj_Close']
+                    asset2_data = historical_data[historical_data['Symbol'] == asset2]['Adj_Close']
 
-                hedge_ratio = self.calculator.calculate_hedge_ratio(
-                    prices[asset1],
-                    prices[asset2]
-                )
+                    votes = self.test_cointegration_multiple_periods(
+                        asset1_data,
+                        asset2_data
+                    )
 
-                spread = prices[asset1] - hedge_ratio * prices[asset2]
-                stats = PairStats(
-                    hedge_ratio=hedge_ratio,
-                    half_life=self.calculator.calculate_half_life(spread),
-                    coint_pvalue=min(v for v in votes.values()),
-                    spread_zscore=self.calculator.calculate_spread_zscore(spread),
-                    spread_vol=spread.std(),
-                    correlation=prices[asset1].pct_change().corr(prices[asset2].pct_change()),
-                    last_update=prices.index[-1],
-                    cointegration_votes=votes,
-                    regime_metrics=self.current_regime if self.regime_adaptation else None,
-                    lookback_data={'spread': spread}
-                )
+                    if sum(votes.values()) < self.min_votes:
+                        signals.loc[date, pair] = 0
+                        continue
 
-                stats.composite_score = self.calculate_composite_score(pair, stats, prices)
-                self.positions[pair] = stats
+                    hedge_ratio = self.calculator.calculate_hedge_ratio(
+                        asset1_data,
+                        asset2_data
+                    )
 
-                signal = self.generate_enhanced_signals(spread, stats)
+                    spread = asset1_data - hedge_ratio * asset2_data
 
-                if signal != 0:
-                    position_sizes = self.calculate_position_sizes_v2(pair, signal, prices)
-                    stats.position_sizes = position_sizes
+                    asset1_returns = asset1_data.pct_change()
+                    asset2_returns = asset2_data.pct_change()
+                    correlation = asset1_returns.corr(asset2_returns)
 
-                    signals[pair] = signal
-                else:
-                    signals[pair] = signals[pair].shift(1).fillna(0)
+                    stats = PairStats(
+                        hedge_ratio=hedge_ratio,
+                        half_life=self.calculator.calculate_half_life(spread),
+                        coint_pvalue=min(v for v in votes.values()),
+                        spread_zscore=self.calculator.calculate_spread_zscore(spread),
+                        spread_vol=spread.std(),
+                        correlation=correlation,
+                        last_update=date,
+                        cointegration_votes=votes,
+                        regime_metrics=self.current_regime if self.regime_adaptation else None,
+                        lookback_data={'spread': spread}
+                    )
 
-            except Exception as e:
-                logger.error(f"Error generating signals for {pair}: {str(e)}")
-                signals[pair] = 0
+                    stats.composite_score = self.calculate_composite_score(pair, stats, historical_data)
+                    self.positions[pair] = stats
+
+                    signal = self.generate_enhanced_signals(spread, stats)
+
+                    if signal != 0:
+                        position_sizes = self.calculate_position_sizes_v2(pair, signal, historical_data)
+                        stats.position_sizes = position_sizes
+                        signals.loc[date, pair] = signal
+                    else:
+                        signals.loc[date, pair] = signals.loc[date, pair].shift(1).fillna(0)
+
+                except Exception as e:
+                    logger.error(f"Error generating signals for pair {pair} at {date}: {str(e)}")
+                    signals.loc[date, pair] = 0
 
         return signals
 
@@ -507,23 +568,25 @@ class EnhancedStatPairsStrategy(BaseStrategy):
         for pair in self.pairs:
             try:
                 asset1, asset2 = pair
-                if asset1 not in prices.columns or asset2 not in prices.columns:
-                    continue
+
+                # Get returns for each asset
+                asset1_data = prices[prices['Symbol'] == asset1].sort_values('Date')
+                asset2_data = prices[prices['Symbol'] == asset2].sort_values('Date')
+
+                rets1 = asset1_data['Adj_Close'].pct_change()
+                rets2 = asset2_data['Adj_Close'].pct_change()
 
                 stats = self.positions.get(pair)
                 if not stats:
                     continue
-
-                rets1 = prices[asset1].pct_change()
-                rets2 = prices[asset2].pct_change()
 
                 pair_signals = signals[pair].shift(1)
                 pair_returns = pair_signals * (rets1 - stats.hedge_ratio * rets2)
 
                 if stats.position_sizes:
                     adj_returns = (
-                        stats.position_sizes['asset1'] * rets1 +
-                        stats.position_sizes['asset2'] * rets2
+                            stats.position_sizes['asset1'] * rets1 +
+                            stats.position_sizes['asset2'] * rets2
                     )
                     pair_returns = pair_signals * adj_returns
 
@@ -884,14 +947,19 @@ class EnhancedStatPairsStrategy(BaseStrategy):
         all_pvalues = []
         all_pairs = []
 
-        for i in range(len(prices.columns)):
-            for j in range(i + 1, len(prices.columns)):
-                asset1, asset2 = prices.columns[i], prices.columns[j]
+        symbols = prices['Symbol'].unique()
+
+        for i in range(len(symbols)):
+            for j in range(i + 1, len(symbols)):
+                asset1, asset2 = symbols[i], symbols[j]
 
                 try:
+                    asset1_prices = prices[prices['Symbol'] == asset1].sort_values('Date')['Adj_Close']
+                    asset2_prices = prices[prices['Symbol'] == asset2].sort_values('Date')['Adj_Close']
+
                     votes = self.test_cointegration_multiple_periods(
-                        prices[asset1],
-                        prices[asset2]
+                        asset1_prices,
+                        asset2_prices
                     )
                     min_pvalue = min(v for v in votes.values())
                     all_pvalues.append(min_pvalue)
@@ -908,20 +976,28 @@ class EnhancedStatPairsStrategy(BaseStrategy):
                 continue
 
             try:
+                asset1_prices = prices[prices['Symbol'] == asset1].sort_values('Date')['Adj_Close']
+                asset2_prices = prices[prices['Symbol'] == asset2].sort_values('Date')['Adj_Close']
+
                 hedge_ratio = self.calculator.calculate_hedge_ratio(
-                    prices[asset1],
-                    prices[asset2]
+                    asset1_prices,
+                    asset2_prices
                 )
 
-                spread = prices[asset1] - hedge_ratio * prices[asset2]
+                spread = asset1_prices - hedge_ratio * asset2_prices
+
+                asset1_returns = asset1_prices.pct_change()
+                asset2_returns = asset2_prices.pct_change()
+                correlation = asset1_returns.corr(asset2_returns)
+
                 stats = PairStats(
                     hedge_ratio=hedge_ratio,
                     half_life=self.calculator.calculate_half_life(spread),
                     coint_pvalue=adj_pval,
                     spread_zscore=self.calculator.calculate_spread_zscore(spread),
                     spread_vol=spread.std(),
-                    correlation=prices[asset1].corr(prices[asset2]),
-                    last_update=prices.index[-1],
+                    correlation=correlation,
+                    last_update=prices['Date'].max(),
                     lookback_data={'spread': spread}
                 )
 

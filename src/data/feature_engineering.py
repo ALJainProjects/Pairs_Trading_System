@@ -10,7 +10,7 @@ This module provides feature engineering for financial time series with:
 
 import pandas as pd
 import numpy as np
-from typing import Optional, Dict, List
+from typing import Optional, List
 from config.logging_config import logger
 
 
@@ -91,15 +91,16 @@ class FeatureEngineer:
             df[ma_col] = df[column].rolling(
                 window=window,
                 min_periods=min_periods
-            ).apply(lambda x: np.sum(weights[:len(x)] * x) / weights[:len(x)].sum(), raw=True)
+            ).apply(
+                lambda x: np.sum(weights[:len(x)] * x) / weights[:len(x)].sum(),
+                raw=True
+            )
         elif ma_type == 'exp':
             df[ma_col] = df[column].ewm(
                 span=window,
                 min_periods=min_periods,
                 adjust=False
             ).mean()
-        else:
-            raise ValueError(f"Unknown MA type: {ma_type}")
 
         return self._handle_nans(df, [ma_col])
 
@@ -255,34 +256,47 @@ class FeatureEngineer:
         logger.info("Generating technical indicators")
 
         if self.validate:
-            self._validate_data(df, ["Adj_Close"])
+            self._validate_data(df, ["Date", "Symbol", "Adj_Close", "Volume"])
 
         df = df.copy()
+        result_df = pd.DataFrame()
 
-        all_features = {
-            'sma': lambda: self.add_moving_average(df, ma_type='simple'),
-            'ema': lambda: self.add_moving_average(df, ma_type='exp'),
-            'wma': lambda: self.add_moving_average(df, ma_type='weighted'),
-            'rsi': lambda: self.add_rsi(df),
-            'macd': lambda: self.add_macd(df),
-            'bbands': lambda: self.add_bollinger_bands(df),
-            'volume': lambda: self.add_volume_indicators(df)
-        }
+        # Process each symbol separately
+        for symbol in df['Symbol'].unique():
+            symbol_mask = df['Symbol'] == symbol
+            symbol_data = df[symbol_mask].sort_values('Date').copy()
 
-        features = features or list(all_features.keys())
-        invalid_features = set(features) - set(all_features.keys())
-        if invalid_features:
-            raise ValueError(f"Unknown feature_engineering: {invalid_features}")
-
-        for feature in features:
+            # Calculate features for each symbol independently
             try:
-                df = all_features[feature]()
-                logger.info(f"Generated {feature} feature_engineering")
-            except Exception as e:
-                logger.error(f"Error generating {feature}: {str(e)}")
-                raise
+                if 'sma' in (features or []):
+                    symbol_data = self.add_moving_average(symbol_data, ma_type='simple')
+                if 'ema' in (features or []):
+                    symbol_data = self.add_moving_average(symbol_data, ma_type='exp')
+                if 'wma' in (features or []):
+                    symbol_data = self.add_moving_average(symbol_data, ma_type='weighted')
+                if 'rsi' in (features or []):
+                    symbol_data = self.add_rsi(symbol_data)
+                if 'macd' in (features or []):
+                    symbol_data = self.add_macd(symbol_data)
+                if 'bbands' in (features or []):
+                    symbol_data = self.add_bollinger_bands(symbol_data)
+                if 'volume' in (features or []):
+                    symbol_data = self.add_volume_indicators(symbol_data)
 
-        return df
+                # Prefix all feature columns with symbol name
+                feature_cols = [col for col in symbol_data.columns
+                                if col not in ['Date', 'Symbol', 'Adj_Close', 'Volume']]
+                for col in feature_cols:
+                    symbol_data[f"{symbol}_{col}"] = symbol_data[col]
+                    symbol_data.drop(columns=[col], inplace=True)
+
+                result_df = pd.concat([result_df, symbol_data])
+
+            except Exception as e:
+                logger.error(f"Error generating features for {symbol}: {str(e)}")
+                continue
+
+        return result_df.sort_values(['Date', 'Symbol']).reset_index(drop=True)
 
 
 def main():

@@ -426,6 +426,10 @@ class EnhancedStrategyBuilder:
                 else:
                     strategy.pairs = pairs
 
+                # print(prices.head(10))
+                # print(prices.columns)
+                # raise
+
                 risk_manager = PairRiskManager(
                     max_position_size=risk_params['max_position_size'],
                     max_drawdown=risk_params['max_drawdown'],
@@ -475,19 +479,20 @@ class EnhancedStrategyBuilder:
 
         data = st.session_state['historical_data']
 
+        if not all(col in data.columns for col in ['Date', 'Symbol', 'Adj_Close', 'Volume']):
+            raise ValueError("Required columns missing in historical data")
+
+        print(data.head(10))
+        print(data.columns)
+
         if 'Date' not in data.columns or 'Symbol' not in data.columns or 'Adj_Close' not in data.columns:
             raise ValueError("Required columns missing in historical data")
 
-        prices = data.pivot(
-            index='Date',
-            columns='Symbol',
-            values='Adj_Close'
-        )
+        filled_data = data.groupby('Symbol').apply(
+            lambda x: x.sort_values('Date').ffill().bfill()
+        ).reset_index(drop=True)
 
-        prices = prices.sort_index()
-        prices = prices.ffill().bfill()
-
-        return prices
+        return filled_data.sort_values(['Symbol', 'Date'])
 
     def _get_selected_pairs(self) -> List[Tuple[str, str]]:
         """
