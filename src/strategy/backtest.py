@@ -26,7 +26,7 @@ class MultiPairBackTester:
         min_liquidity_threshold: float = 100000
     ):
         self.strategy = strategy
-        self.prices = prices
+        self.prices = prices.copy()
         self.returns = self._calculate_returns(prices)
         self.initial_capital = initial_capital
         self.risk_manager = risk_manager
@@ -183,7 +183,7 @@ class MultiPairBackTester:
                     if self.risk_manager:
                         self.risk_manager.update_risk_metrics(
                             pair,
-                            self.returns,
+                            self.prices,
                             self.active_pairs,
                             confidence
                         )
@@ -232,7 +232,7 @@ class MultiPairBackTester:
                     if self.risk_manager:
                         self.risk_manager.update_risk_metrics(
                             pair,
-                            self.returns,
+                            self.prices,
                             self.active_pairs,
                             confidence
                         )
@@ -276,9 +276,9 @@ class MultiPairBackTester:
                 self.risk_manager.calculate_position_size(
                     portfolio_value,
                     pair,
-                    self.returns,
+                    self.prices,
                     confidence,
-                    self.returns.corr()
+                    self.prices.pivot(index='Date', columns='Symbol', values='Adj_Close').corr()
                 )
                 if self.risk_manager
                 else portfolio_value * self.strategy.max_position_size

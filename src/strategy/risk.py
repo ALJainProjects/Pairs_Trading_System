@@ -110,7 +110,20 @@ class PairRiskManager:
                             positions: Dict,
                             model_confidence: Optional[float] = None) -> RiskMetrics:
         """Update comprehensive risk metrics for a pair"""
-        returns = self._calculate_pair_returns(pair, prices)
+        asset1, asset2 = pair
+        if asset1 not in prices['Symbol'].unique() or asset2 not in prices['Symbol'].unique():
+            raise ValueError(f"Missing price data for pair {asset1}/{asset2}")
+
+        # Get the price series for each asset
+        asset1_data = prices[prices['Symbol'] == asset1].sort_values('Date')
+        asset2_data = prices[prices['Symbol'] == asset2].sort_values('Date')
+
+        pair_prices = pd.DataFrame({
+            asset1: asset1_data['Adj_Close'].values,
+            asset2: asset2_data['Adj_Close'].values
+        }, index=asset1_data['Date'])
+
+        returns = self._calculate_pair_returns(pair, pair_prices)
         var, cvar = self.calculate_var_cvar(returns)
 
         self.correlation_matrix = prices.pct_change().dropna()

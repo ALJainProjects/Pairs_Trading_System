@@ -485,17 +485,20 @@ class EnhancedStrategyBuilder:
         if not all(col in data.columns for col in ['Date', 'Symbol', 'Adj_Close', 'Volume']):
             raise ValueError("Required columns missing in historical data")
 
-        print(data.head(10))
-        print(data.columns)
+        available_symbols = set(data['Symbol'].unique())
 
-        if 'Date' not in data.columns or 'Symbol' not in data.columns or 'Adj_Close' not in data.columns:
-            raise ValueError("Required columns missing in historical data")
+        for pair in self._get_selected_pairs():
+            asset1, asset2 = pair
+            if asset1 not in available_symbols:
+                raise ValueError(f"Symbol {asset1} not found in historical data")
+            if asset2 not in available_symbols:
+                raise ValueError(f"Symbol {asset2} not found in historical data")
 
         filled_data = data.groupby('Symbol').apply(
             lambda x: x.sort_values('Date').ffill().bfill()
         ).reset_index(drop=True)
 
-        return filled_data.sort_values(['Symbol', 'Date'])
+        return filled_data.sort_values(['Date', 'Symbol'])
 
     def _get_selected_pairs(self) -> List[Tuple[str, str]]:
         """
