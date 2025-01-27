@@ -398,15 +398,20 @@ class PairsTradingDL(BaseStrategy):
         }
 
     def prepare_pair_data(self,
-                         stock1_prices: pd.Series,
-                         stock2_prices: pd.Series,
-                         start_idx: Optional[int] = None) -> pd.DataFrame:
+                          stock1_prices: pd.Series,
+                          stock2_prices: pd.Series,
+                          stock1_volumes: pd.Series = None,
+                          stock2_volumes: pd.Series = None,
+                          start_idx: Optional[int] = None) -> pd.DataFrame:
         """
         Prepare pair data using expanding windows to prevent look-ahead bias.
+        Includes enhanced volume-based features.
 
         Args:
             stock1_prices: First stock prices
             stock2_prices: Second stock prices
+            stock1_volumes: First stock volumes
+            stock2_volumes: Second stock volumes
             start_idx: Starting index for calculations
 
         Returns:
@@ -417,37 +422,172 @@ class PairsTradingDL(BaseStrategy):
 
         spread = stock1_prices - stock2_prices
         ratio = stock1_prices / stock2_prices
+        log_ratio = np.log(ratio)
 
         data = pd.DataFrame({
             'spread': spread,
             'ratio': ratio,
+            'log_ratio': log_ratio,
             'return1': stock1_prices.pct_change(),
             'return2': stock2_prices.pct_change()
         })
 
-        for col in ['spread', 'ratio']:
-            roll_mean = data[col].rolling(
-                window=self.sequence_length,
-                min_periods=self.sequence_length
-            ).mean()
-            roll_std = data[col].rolling(
-                window=self.sequence_length,
-                min_periods=self.sequence_length
-            ).std()
+        if stock1_volumes is not None and stock2_volumes is not None:
+            vol1_ma = stock1_volumes.rolling(window=20).mean()
+            vol2_ma = stock2_volumes.rolling(window=20).mean()
+            norm_vol1 = stock1_volumes / vol1_ma
+            norm_vol2 = stock2_volumes / vol2_ma
 
-            data[f'{col}_ma'] = roll_mean
-            data[f'{col}_std'] = roll_std
-            data[f'{col}_zscore'] = (data[col] - roll_mean) / roll_std
+            data['volume_ratio'] = norm_vol1 / norm_vol2
+            data['log_volume_ratio'] = np.log(data['volume_ratio'])
 
-        data['rolling_corr'] = stock1_prices.rolling(
-            window=self.sequence_length
-        ).corr(stock2_prices)
-        data['spread_vol'] = spread.rolling(
-            window=self.sequence_length
-        ).std()
+            dollar_vol1 = stock1_prices * stock1_volumes
+            dollar_vol2 = stock2_prices * stock2_volumes
 
-        data['momentum1'] = stock1_prices.pct_change(self.sequence_length)
-        data['momentum2'] = stock2_prices.pct_change(self.sequence_length)
+            data['dollar_volume_ratio'] = dollar_vol1 / dollar_vol2
+            data['log_dollar_volume_ratio'] = np.log(data['dollar_volume_ratio'])
+
+            for window in [5, 10, 20]:
+                data[f'vol_mom1_{window}'] = norm_vol1.pct_change(window)
+                data[f'vol_mom2_{window}'] = norm_vol2.pct_change(window)
+
+                data[f'vol_std1_{window}'] = norm_vol1.rolling(window).std()
+                data[f'vol_std2_{window}'] = norm_vol2.rolling(window).std()
+
+                data[f'vol_ratio_mom_{window}'] = data['volume_ratio'].pct_change(window)
+
+                data[f'dollar_vol_mom1_{window}'] = dollar_vol1.pct_change(window)
+                data[f'dollar_vol_mom2_{window}'] = dollar_vol2.pct_change(window)
+
+                vwap1 = (dollar_vol1.rolling(window).sum() /
+                         stock1_volumes.rolling(window).sum())
+                vwap2 = (dollar_vol2.rolling(window).sum() /
+                         stock2_volumes.rolling(window).sum())
+
+                data[f'vwap_ratio_{window}'] = vwap1 / vwap2
+                data[f'vwap_spread_{window}'] = vwap1 - vwap2
+
+                data[f'vol_weighted_ret1_{window}'] = (
+                        data['return1'] * norm_vol1
+                ).rolling(window).mean()
+                data[f'vol_weighted_ret2_{window}'] = (
+                        data['return2'] * norm_vol2
+                ).rolling(window).mean()
+
+                data[f'vol_price_corr1_{window}'] = (
+                    pd.DataFrame({'price': stock1_prices, 'volume': norm_vol1})
+                    .rolling(window)
+                    .corr()
+                    .unstack()
+                    .iloc[:, 1]
+                )
+                data[f'vol_price_corr2_{window}'] = (
+                    pd.DataFrame({'price': stock2_prices, 'volume': norm_vol2})
+                    .rolling(window)
+                    .corr()
+                    .unstack()
+                    .iloc[:, 1]
+                )
+
+                data[f'vol_spread_{window}'] = spread * np.sqrt(norm_vol1 * norm_vol2)
+                data[f'vol_spread_ma_{window}'] = (
+                    data[f'vol_spread_{window}'].rolling(window).mean()
+                )
+                data[f'vol_spread_std_{window}'] = (
+                    data[f'vol_spread_{window}'].rolling(window).std()
+                )
+
+                data[f'vol_trend1_{window}'] = (
+                    norm_vol1.rolling(window)
+                    .apply(lambda x: (np.sum(x > x.mean()) / len(x)))
+                )
+                data[f'vol_trend2_{window}'] = (
+                    norm_vol2.rolling(window)
+                    .apply(lambda x: (np.sum(x > x.mean()) / len(x)))
+                )
+
+                data[f'vol_dispersion1_{window}'] = (
+                        norm_vol1.rolling(window).std() /
+                        norm_vol1.rolling(window).mean()
+                )
+                data[f'vol_dispersion2_{window}'] = (
+                        norm_vol2.rolling(window).std() /
+                        norm_vol2.rolling(window).mean()
+                )
+
+                data[f'abnormal_vol1_{window}'] = (
+                                                          norm_vol1 - norm_vol1.rolling(window).mean()
+                                                  ) / norm_vol1.rolling(window).std()
+                data[f'abnormal_vol2_{window}'] = (
+                                                          norm_vol2 - norm_vol2.rolling(window).mean()
+                                                  ) / norm_vol2.rolling(window).std()
+
+                data[f'vol_weighted_spread_{window}'] = (
+                        spread * (norm_vol1 + norm_vol2) / 2
+                ).rolling(window).mean()
+
+                delta_vol1 = norm_vol1.diff()
+                delta_vol2 = norm_vol2.diff()
+
+                gain1 = (delta_vol1.where(delta_vol1 > 0, 0)
+                         .rolling(window).mean())
+                loss1 = (-delta_vol1.where(delta_vol1 < 0, 0)
+                         .rolling(window).mean())
+                gain2 = (delta_vol2.where(delta_vol2 > 0, 0)
+                         .rolling(window).mean())
+                loss2 = (-delta_vol2.where(delta_vol2 < 0, 0)
+                         .rolling(window).mean())
+
+                rs1 = gain1 / loss1
+                rs2 = gain2 / loss2
+
+                data[f'vol_rsi1_{window}'] = 100 - (100 / (1 + rs1))
+                data[f'vol_rsi2_{window}'] = 100 - (100 / (1 + rs2))
+
+                data[f'high_vol_regime_{window}'] = (
+                        (data[f'abnormal_vol1_{window}'] > 1.5) &
+                        (data[f'abnormal_vol2_{window}'] > 1.5)
+                ).astype(float)
+
+                data[f'vol_accel1_{window}'] = data[f'vol_mom1_{window}'].diff()
+                data[f'vol_accel2_{window}'] = data[f'vol_mom2_{window}'].diff()
+
+        for window in [5, 10, 20, 60]:
+            data[f'spread_ma_{window}'] = spread.rolling(window).mean()
+            data[f'spread_std_{window}'] = spread.rolling(window).std()
+            data[f'spread_zscore_{window}'] = (
+                    (spread - data[f'spread_ma_{window}']) /
+                    data[f'spread_std_{window}']
+            )
+
+            data[f'ratio_ma_{window}'] = ratio.rolling(window).mean()
+            data[f'ratio_std_{window}'] = ratio.rolling(window).std()
+            data[f'ratio_zscore_{window}'] = (
+                    (ratio - data[f'ratio_ma_{window}']) /
+                    data[f'ratio_std_{window}']
+            )
+
+            data[f'log_ratio_ma_{window}'] = log_ratio.rolling(window).mean()
+            data[f'log_ratio_std_{window}'] = log_ratio.rolling(window).std()
+
+            data[f'return_corr_{window}'] = (
+                pd.DataFrame({'ret1': data['return1'], 'ret2': data['return2']})
+                .rolling(window)
+                .corr()
+                .unstack()
+                .iloc[:, 1]
+            )
+
+            data[f'momentum1_{window}'] = stock1_prices.pct_change(window)
+            data[f'momentum2_{window}'] = stock2_prices.pct_change(window)
+
+            rolling_cov = (
+                data['return1']
+                .rolling(window)
+                .cov(data['return2'])
+            )
+            rolling_var = data['return2'].rolling(window).var()
+            data[f'beta_{window}'] = rolling_cov / rolling_var
 
         data = data.dropna()
 

@@ -273,7 +273,7 @@ class MLPairsStrategy(BaseStrategy):
                 features = self.prepare_features(
                     prices[asset1],
                     prices[asset2]
-                )
+                ) # can be enhanced to use volume
 
                 if not self._trained:
                     labels = self.ml_model.create_advanced_spread_labels(

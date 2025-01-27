@@ -90,9 +90,24 @@ class MachineLearningModel:
     def prepare_features(self,
                          price1: pd.Series,
                          price2: pd.Series,
+                         volume1: pd.Series = None,
+                         volume2: pd.Series = None,
                          windows: List[int] = (5, 20, 60),
                          lag_windows: List[int] = (1, 2, 3, 5, 10)) -> pd.DataFrame:
-        """Prepare features without lookahead bias, including lagged spread features."""
+        """
+        Prepare features without lookahead bias, including enhanced volume-based features.
+
+        Args:
+            price1: Price series for first asset
+            price2: Price series for second asset
+            volume1: Volume series for first asset
+            volume2: Volume series for second asset
+            windows: List of rolling window sizes
+            lag_windows: List of lag periods
+
+        Returns:
+            DataFrame with engineered features
+        """
         features = pd.DataFrame(index=price1.index)
 
         hedge_ratio = self.calculate_dynamic_hedge_ratio(price1, price2)
@@ -121,8 +136,160 @@ class MachineLearningModel:
                     features[f'spread_vol_{window}'].shift(window)
             )
 
-        df1 = pd.DataFrame({'Close': price1})
-        df2 = pd.DataFrame({'Close': price2})
+        if volume1 is not None and volume2 is not None:
+            norm_vol1 = volume1 / volume1.rolling(window=60).mean()
+            norm_vol2 = volume2 / volume2.rolling(window=60).mean()
+
+            log_vol1 = np.log1p(volume1)
+            log_vol2 = np.log1p(volume2)
+
+            vol_ratio = norm_vol1 / norm_vol2
+            features['volume_ratio'] = vol_ratio.shift(1)
+
+            dollar_vol1 = price1 * volume1
+            dollar_vol2 = price2 * volume2
+
+            norm_dollar_vol1 = dollar_vol1 / dollar_vol1.rolling(window=60).mean()
+            norm_dollar_vol2 = dollar_vol2 / dollar_vol2.rolling(window=60).mean()
+
+            features['relative_dollar_vol_strength'] = (
+                (norm_dollar_vol1 / norm_dollar_vol2).shift(1)
+            )
+
+            for window in windows:
+                features[f'vol1_ma_{window}'] = norm_vol1.shift(1).rolling(window).mean()
+                features[f'vol2_ma_{window}'] = norm_vol2.shift(1).rolling(window).mean()
+
+                features[f'vol1_std_{window}'] = norm_vol1.shift(1).rolling(window).std()
+                features[f'vol2_std_{window}'] = norm_vol2.shift(1).rolling(window).std()
+
+                features[f'vol1_mom_{window}'] = norm_vol1.shift(1).pct_change(window)
+                features[f'vol2_mom_{window}'] = norm_vol2.shift(1).pct_change(window)
+
+                features[f'vol1_accel_{window}'] = features[f'vol1_mom_{window}'].diff()
+                features[f'vol2_accel_{window}'] = features[f'vol2_mom_{window}'].diff()
+
+                features[f'vol_ratio_ma_{window}'] = vol_ratio.shift(1).rolling(window).mean()
+                features[f'vol_ratio_std_{window}'] = vol_ratio.shift(1).rolling(window).std()
+
+                features[f'dollar_vol1_ma_{window}'] = norm_dollar_vol1.shift(1).rolling(window).mean()
+                features[f'dollar_vol2_ma_{window}'] = norm_dollar_vol2.shift(1).rolling(window).mean()
+
+                vwap1 = (price1 * volume1).rolling(window).sum() / volume1.rolling(window).sum()
+                vwap2 = (price2 * volume2).rolling(window).sum() / volume2.rolling(window).sum()
+
+                features[f'vwap1_ratio_{window}'] = (price1.shift(1) / vwap1.shift(1) - 1)
+                features[f'vwap2_ratio_{window}'] = (price2.shift(1) / vwap2.shift(1) - 1)
+
+                vol_spread = spread * np.sqrt(norm_vol1 * norm_vol2)
+                features[f'vol_spread_ma_{window}'] = vol_spread.shift(1).rolling(window).mean()
+                features[f'vol_spread_std_{window}'] = vol_spread.shift(1).rolling(window).std()
+
+                features[f'vol_imbalance_{window}'] = (
+                        (norm_vol1 - norm_vol2) / (norm_vol1 + norm_vol2)
+                ).shift(1).rolling(window).mean()
+
+                features[f'dollar_vol_imbalance_{window}'] = (
+                        (norm_dollar_vol1 - norm_dollar_vol2) / (norm_dollar_vol1 + norm_dollar_vol2)
+                ).shift(1).rolling(window).mean()
+
+                features[f'vol1_concentration_{window}'] = (
+                        volume1.shift(1) / volume1.shift(1).rolling(window).sum()
+                )
+                features[f'vol2_concentration_{window}'] = (
+                        volume2.shift(1) / volume2.shift(1).rolling(window).sum()
+                )
+
+                vol1_ema = norm_vol1.shift(1).ewm(span=window).mean()
+                vol2_ema = norm_vol2.shift(1).ewm(span=window).mean()
+
+                features[f'vol1_abnormal_{window}'] = norm_vol1.shift(1) / vol1_ema
+                features[f'vol2_abnormal_{window}'] = norm_vol2.shift(1) / vol2_ema
+
+                high_vol_regime = (
+                        (features[f'vol1_abnormal_{window}'] > 1.5) &
+                        (features[f'vol2_abnormal_{window}'] > 1.5)
+                ).astype(int)
+                features[f'high_vol_regime_{window}'] = high_vol_regime
+
+                features[f'vol1_dispersion_{window}'] = (
+                        features[f'vol1_std_{window}'] / features[f'vol1_ma_{window}']
+                )
+                features[f'vol2_dispersion_{window}'] = (
+                        features[f'vol2_std_{window}'] / features[f'vol2_ma_{window}']
+                )
+
+                if len(volume1) >= 2 * window:
+                    features[f'vol1_daily_seasonal_{window}'] = (
+                            norm_vol1.shift(1) / norm_vol1.shift(window)
+                    )
+                    features[f'vol2_daily_seasonal_{window}'] = (
+                            norm_vol2.shift(1) / norm_vol2.shift(window)
+                    )
+
+                    if window >= 5:
+                        features[f'vol1_weekly_seasonal_{window}'] = (
+                                norm_vol1.shift(1) / norm_vol1.shift(5).rolling(window).mean()
+                        )
+                        features[f'vol2_weekly_seasonal_{window}'] = (
+                                norm_vol2.shift(1) / norm_vol2.shift(5).rolling(window).mean()
+                        )
+
+                features[f'vol1_rel_strength_{window}'] = (
+                        norm_vol1.shift(1) / norm_vol1.shift(1).rolling(window).max()
+                )
+                features[f'vol2_rel_strength_{window}'] = (
+                        norm_vol2.shift(1) / norm_vol2.shift(1).rolling(window).max()
+                )
+
+                features[f'vol1_support_{window}'] = (
+                    volume1.shift(1).rolling(window).quantile(0.25)
+                )
+                features[f'vol1_resistance_{window}'] = (
+                    volume1.shift(1).rolling(window).quantile(0.75)
+                )
+                features[f'vol2_support_{window}'] = (
+                    volume2.shift(1).rolling(window).quantile(0.25)
+                )
+                features[f'vol2_resistance_{window}'] = (
+                    volume2.shift(1).rolling(window).quantile(0.75)
+                )
+
+                vol_weighted_spread = spread * (norm_vol1 + norm_vol2) / 2
+                features[f'vol_weighted_spread_ma_{window}'] = (
+                    vol_weighted_spread.shift(1).rolling(window).mean()
+                )
+                features[f'vol_weighted_spread_std_{window}'] = (
+                    vol_weighted_spread.shift(1).rolling(window).std()
+                )
+
+                price1_direction = np.sign(price1.shift(1).diff())
+                price2_direction = np.sign(price2.shift(1).diff())
+                vol1_direction = np.sign(volume1.shift(1).diff())
+                vol2_direction = np.sign(volume2.shift(1).diff())
+
+                features[f'vol1_price_divergence_{window}'] = (
+                    (price1_direction != vol1_direction).astype(float).rolling(window).mean()
+                )
+                features[f'vol2_price_divergence_{window}'] = (
+                    (price2_direction != vol2_direction).astype(float).rolling(window).mean()
+                )
+
+                features[f'pair_vol_coherence_{window}'] = (
+                    (vol1_direction == vol2_direction).astype(float).rolling(window).mean()
+                )
+
+                features[f'vol1_intensity_{window}'] = (
+                    (volume1.shift(1) * abs(price1.shift(1).pct_change()))
+                    .rolling(window).mean()
+                )
+                features[f'vol2_intensity_{window}'] = (
+                    (volume2.shift(1) * abs(price2.shift(1).pct_change()))
+                    .rolling(window).mean()
+                )
+
+        df1 = pd.DataFrame({'Adj_Close': price1})
+        df2 = pd.DataFrame({'Adj_Close': price2})
 
         tech_features1 = self.feature_engineer.generate_features(
             df1, features=['sma', 'rsi', 'bbands', 'macd']
@@ -132,7 +299,7 @@ class MachineLearningModel:
         )
 
         for col in tech_features1.columns:
-            if col != 'Close':
+            if col != 'Adj_Close':
                 features[f'{col}_1'] = tech_features1[col]
                 features[f'{col}_2'] = tech_features2[col]
 
@@ -152,11 +319,7 @@ class MachineLearningModel:
                 .corr(returns2.shift(1))
             )
 
-            cov = (
-                returns1.shift(1)
-                .rolling(window)
-                .cov(returns2.shift(1))
-            )
+            cov = returns1.shift(1).rolling(window).cov(returns2.shift(1))
             var = returns2.shift(1).rolling(window).var()
             features[f'beta_{window}'] = cov / (var + 1e-8)
 
@@ -182,7 +345,6 @@ class MachineLearningModel:
         features['ratio_change'] = price_ratio.pct_change().shift(1)
 
         features = features.bfill().dropna()
-
         return features
 
     def create_spread_labels(self,
@@ -440,14 +602,14 @@ def main():
     ml_model = MachineLearningModel()
 
     features_df = ml_model.prepare_features(
-        stock1['Close'],
-        stock2['Close'],
+        stock1['Adj_Close'],
+        stock2['Adj_Close'],
         windows=[5, 20, 60]
     )
 
     signals = ml_model.create_advanced_spread_labels(
-        stock1['Close'],
-        stock2['Close'],
+        stock1['Adj_Close'],
+        stock2['Adj_Close'],
         lookback_window=20,
         zscore_threshold=2.0,
         vol_lookback=60

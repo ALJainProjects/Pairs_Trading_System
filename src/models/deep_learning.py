@@ -19,6 +19,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import warnings
 
+from keras import Model, Layer
+from keras.src.activations import softmax, tanh
+from keras.src.layers import Multiply, dot, BatchNormalization
+from tensorflow import reduce_sum
+from tensorflow.python.keras.callbacks import ReduceLROnPlateau, TensorBoard
+
 from src.data import FeatureEngineer
 
 try:
@@ -41,6 +47,40 @@ except ImportError:
 
 from config.logging_config import logger
 from config.settings import MODEL_DIR
+
+
+class TemporalAttention(Layer):
+    """Temporal attention mechanism adapted for financial time series."""
+
+    def __init__(self, return_sequences=False, **kwargs):
+        self.return_sequences = return_sequences
+        super().__init__(**kwargs)
+
+    def build(self, input_shape):
+        self.W = self.add_weight(
+            name="attention_weight",
+            shape=(input_shape[-1], 1),
+            initializer="glorot_uniform",
+            trainable=True
+        )
+        self.b = self.add_weight(
+            name="attention_bias",
+            shape=(input_shape[1], 1),
+            initializer="zeros",
+            trainable=True
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        e = tanh(dot(inputs, self.W) + self.b)
+        a = softmax(e, axis=1)
+
+        weighted_input = Multiply()([inputs, a])
+
+        if self.return_sequences:
+            return weighted_input
+
+        return reduce_sum(weighted_input, axis=1)
 
 
 class DeepLearningModel:
@@ -134,50 +174,58 @@ class DeepLearningModel:
         return X, y
 
     def build_lstm_model(
-        self,
-        input_shape: Tuple[int, int],
-        lstm_units: List[int] = (50, 50),
-        dense_units: List[int] = (32,),
-        dropout_rate: float = 0.2,
-        learning_rate: float = 0.001
+            self,
+            input_shape: Tuple[int, int],
+            lstm_units: List[int] = (50, 50),
+            dense_units: List[int] = (32,),
+            dropout_rate: float = 0.2,
+            learning_rate: float = 0.001
     ) -> Sequential:
         """
-        Build LSTM model with configurable architecture.
+        Build LSTM model with temporal attention for pairs trading.
 
         Args:
-            input_shape: Shape of input sequences
+            input_shape: Shape of input sequences (sequence_length, features)
             lstm_units: List of units for LSTM layers
             dense_units: List of units for Dense layers
             dropout_rate: Dropout rate
             learning_rate: Learning rate for optimizer
         """
-        logger.info("Building LSTM model")
+        logger.info("Building LSTM model with temporal attention")
 
-        model = Sequential([
-            Input(shape=input_shape),
-            *[
-                layer for i, units in enumerate(lstm_units)
-                for layer in [
-                    LSTM(
-                        units,
-                        return_sequences=(i < len(lstm_units) - 1),
-                        activation='tanh'
-                    ),
-                    Dropout(dropout_rate)
-                ]
-            ],
-            *[
-                layer for units in dense_units
-                for layer in [
-                    Dense(units, activation='relu'),
-                    Dropout(dropout_rate)
-                ]
-            ],
-            Dense(1, activation='linear')
-        ])
+        inputs = Input(shape=input_shape)
+        x = BatchNormalization(name='input_normalization')(inputs)
 
+        for i, units in enumerate(lstm_units):
+            lstm_out = LSTM(
+                units,
+                return_sequences=True,
+                activation='tanh'
+            )(x)
+
+            x = BatchNormalization(name=f'batch_norm_lstm_{i}')(lstm_out)
+
+            x = Dropout(dropout_rate, name=f'dropout_lstm_{i}')(x)
+
+            attention = TemporalAttention(
+                return_sequences=(i < len(lstm_units) - 1),
+                name=f'temporal_attention_{i}'
+            )(x)
+
+            x = attention
+
+        for i, units in enumerate(dense_units):
+            x = Dense(units, activation='relu')(x)
+
+            x = BatchNormalization(name=f'batch_norm_dense_{i}')(x)
+
+            x = Dropout(dropout_rate, name=f'dropout_dense_{i}')(x)
+
+        outputs = Dense(1, activation='linear', name='output')(x)
+
+        model = Model(inputs=inputs, outputs=outputs)
         model.compile(
-            optimizer=Adam(learning_rate=learning_rate),
+            optimizer=Adam(learning_rate=learning_rate, clipnorm=1.0),
             loss='mean_squared_error',
             metrics=['mae']
         )
@@ -207,7 +255,7 @@ class DeepLearningModel:
         model.add(Dense(1, activation='sigmoid'))
 
         model.compile(
-            optimizer=Adam(learning_rate=learning_rate),
+            optimizer=Adam(learning_rate=learning_rate, clipnorm=1.0),
             loss='binary_crossentropy',
             metrics=['accuracy']
         )
@@ -221,10 +269,11 @@ class DeepLearningModel:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-        epochs: int = 100,
+        epochs: int = 1000,
         batch_size: int = 32,
-        patience: int = 10,
-        model_prefix: str = "model"
+        patience: int = 50,
+        model_prefix: str = "model",
+        class_weights: Optional[Dict] = None
     ) -> Sequential:
         """
         Train model with early stopping and checkpoints.
@@ -240,7 +289,7 @@ class DeepLearningModel:
             model_prefix: Prefix for saved model files
         """
         if self._current_model is None:
-            raise ValueError("Build model first using build_lstm_model or build_dense_model")
+            raise ValueError("Build model first using build_lstm_model")
 
         callbacks = [
             EarlyStopping(
@@ -248,6 +297,17 @@ class DeepLearningModel:
                 patience=patience,
                 restore_best_weights=True,
                 verbose=1
+            ),
+            ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=patience // 2,
+                min_lr=1e-6,
+                verbose=1
+            ),
+            TensorBoard(
+                log_dir=f'{self.model_dir}/logs/{model_prefix}',
+                histogram_freq=1
             )
         ]
 
@@ -267,6 +327,8 @@ class DeepLearningModel:
             epochs=epochs,
             batch_size=batch_size,
             callbacks=callbacks,
+            class_weight=class_weights,
+            shuffle=False,
             verbose=1
         )
 
@@ -319,11 +381,69 @@ class DeepLearningModel:
         else:
             raise ValueError(f"Unknown task type: {task}")
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """Make predictions with current model."""
+    def predict(
+            self,
+            X: np.ndarray,
+            return_confidence: bool = True
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, np.ndarray]]]:
+        """
+        Make predictions with confidence estimates and attention weights.
+
+        Args:
+            X: Input features
+            return_confidence: Whether to return confidence estimates
+
+        Returns:
+            Either predictions only or tuple of (predictions, confidence_info)
+        """
         if self._current_model is None:
             raise ValueError("No model available for prediction")
-        return self._current_model.predict(X)
+
+        predictions = self._current_model.predict(X)
+
+        if not return_confidence:
+            return predictions
+
+        confidence_info = {}
+
+        if any(isinstance(layer, Dropout) for layer in self._current_model.layers):
+            MC_SAMPLES = 30
+            mc_predictions = np.array([
+                self._current_model(X, training=True)
+                for _ in range(MC_SAMPLES)
+            ])
+            confidence_info['model_uncertainty'] = np.std(mc_predictions, axis=0)
+            confidence_info['prediction_mean'] = np.mean(mc_predictions, axis=0)
+
+        if any('attention' in layer.name for layer in self._current_model.layers):
+            attention_layers = [layer for layer in self._current_model.layers
+                                if isinstance(layer, TemporalAttention)]
+
+            if attention_layers:
+                attention_model = Model(
+                    inputs=self._current_model.input,
+                    outputs=[layer.output for layer in attention_layers]
+                )
+                attention_weights = attention_model.predict(X)
+
+                if isinstance(attention_weights, list):
+                    confidence_info['attention_weights'] = {
+                        f'layer_{i}': weights
+                        for i, weights in enumerate(attention_weights)
+                    }
+                else:
+                    confidence_info['attention_weights'] = attention_weights
+
+        if 'attention_weights' in confidence_info:
+            avg_attention = np.mean(
+                list(confidence_info['attention_weights'].values())
+                if isinstance(confidence_info['attention_weights'], dict)
+                else confidence_info['attention_weights'],
+                axis=0
+            )
+            confidence_info['feature_importance'] = avg_attention
+
+        return predictions, confidence_info
 
     def plot_training_history(
         self,
