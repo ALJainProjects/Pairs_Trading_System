@@ -286,6 +286,6 @@ This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md
 
 ## 📧 Contact
 
-Your Name - your.email@example.com
+Your Name - ajain.careers@gmail.com
 
-Project Link: [https://github.com/yourusername/pair_trading](https://github.com/yourusername/pair_trading)
+Project Link: [https://github.com/AJAllProjects/Pairs_Trading_System](https://github.com/yourusername/pair_trading)
