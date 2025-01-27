@@ -1,7 +1,7 @@
 """
 Enhanced Backtesting Module with Advanced Analytics and Risk Management
 """
-
+import traceback
 from typing import Dict, Optional, Tuple, Any, Union
 import numpy as np
 import pandas as pd
@@ -59,6 +59,13 @@ class MultiPairBackTester:
 
     def _initialize_components(self):
         """Initialize strategy components"""
+        if isinstance(self.prices, pd.DataFrame):
+            if not {'Date', 'Symbol', 'Adj_Close'}.issubset(self.prices.columns):
+                raise ValueError("Prices DataFrame must contain Date, Symbol, and Adj_Close columns")
+
+            self.prices['Date'] = pd.to_datetime(self.prices['Date'])
+            self.prices = self.prices.sort_values(['Date', 'Symbol'])
+
         self.trade_history = pd.DataFrame(
             columns=[
                 'Date', 'Pair', 'Action', 'Quantity', 'Price1', 'Price2',
@@ -75,7 +82,6 @@ class MultiPairBackTester:
         """Execute enhanced backtest with non-pivoted data"""
         logger.info("Starting backtest with enhanced monitoring")
 
-        # Get unique dates for iteration
         unique_dates = self.prices['Date'].unique()
         self.equity_curve = pd.Series(index=unique_dates, dtype=float)
         portfolio_value = self.initial_capital
@@ -118,6 +124,8 @@ class MultiPairBackTester:
 
             except Exception as e:
                 logger.error(f"Error in backtest at {current_date}: {str(e)}")
+                error_trace = traceback.format_exc()
+                logger.error(f"Error in backtest at: {str(e)}\nFull traceback:\n{error_trace}")
                 continue
 
         logger.info("Backtest completed")

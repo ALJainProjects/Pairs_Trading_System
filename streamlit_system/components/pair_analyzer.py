@@ -83,7 +83,7 @@ class EnhancedPairAnalyzer:
             lookback = st.number_input(
                 "Lookback Period (days)",
                 min_value=30,
-                max_value=504,
+                max_value=756,
                 value=252
             )
 
@@ -95,7 +95,7 @@ class EnhancedPairAnalyzer:
             rolling_window = st.number_input(
                 "Rolling Window (days)",
                 min_value=20,
-                max_value=252,
+                max_value=756,
                 value=63
             )
 
@@ -191,7 +191,7 @@ class EnhancedPairAnalyzer:
             lookback_window = st.number_input(
                 "Lookback_window (days)",
                 min_value=31,
-                max_value=756,
+                max_value=1008,
                 value=504
             )
 

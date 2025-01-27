@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
+import traceback
 from typing import Dict, List, Tuple
 
 from config.logging_config import logger
@@ -466,6 +467,8 @@ class EnhancedStrategyBuilder:
         except Exception as e:
             st.error(f"Error running backtest: {str(e)}")
             logger.error(f"Backtest error: {str(e)}", exc_info=True)
+            error_trace = traceback.format_exc()
+            logger.error(f"Error in backtest at: {str(e)}\nFull traceback:\n{error_trace}")
 
     def _get_price_data(self) -> pd.DataFrame:
         """

@@ -261,12 +261,10 @@ class FeatureEngineer:
         df = df.copy()
         result_df = pd.DataFrame()
 
-        # Process each symbol separately
         for symbol in df['Symbol'].unique():
             symbol_mask = df['Symbol'] == symbol
             symbol_data = df[symbol_mask].sort_values('Date').copy()
 
-            # Calculate features for each symbol independently
             try:
                 if 'sma' in (features or []):
                     symbol_data = self.add_moving_average(symbol_data, ma_type='simple')
@@ -283,7 +281,6 @@ class FeatureEngineer:
                 if 'volume' in (features or []):
                     symbol_data = self.add_volume_indicators(symbol_data)
 
-                # Prefix all feature columns with symbol name
                 feature_cols = [col for col in symbol_data.columns
                                 if col not in ['Date', 'Symbol', 'Adj_Close', 'Volume']]
                 for col in feature_cols:

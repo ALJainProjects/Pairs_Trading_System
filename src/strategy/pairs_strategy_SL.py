@@ -63,29 +63,40 @@ class MarketRegimeDetector:
         self.kmeans = KMeans(n_clusters=n_regimes)
 
     def calculate_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Calculate regime detection features"""
+        """Calculate regime detection features with proper Series handling"""
         features = pd.DataFrame(index=data['Date'].unique())
 
-        returns_by_symbol = {}
-        for symbol in data['Symbol'].unique():
-            mask = data['Symbol'] == symbol
-            symbol_data = data[mask].sort_values('Date')
-            returns_by_symbol[symbol] = symbol_data['Adj_Close'].pct_change()
+        symbol_groups = data.groupby('Symbol')
 
-        returns_matrix = pd.DataFrame(returns_by_symbol, index=features.index).fillna(0)
+        returns_by_symbol = {}
+        for symbol, group in symbol_groups:
+            group_sorted = group.sort_values('Date')
+            returns_by_symbol[symbol] = pd.Series(
+                group_sorted['Adj_Close'].pct_change().values,
+                index=group_sorted['Date']
+            )
+
+        returns_matrix = pd.DataFrame(returns_by_symbol)
+        returns_matrix = returns_matrix.ffill().bfill()
+
+        def safe_rolling_std(x):
+            if isinstance(x, pd.Series):
+                return x.rolling(window=self.window).std()
+            return pd.Series(0, index=features.index)
 
         symbol_vols = pd.DataFrame()
         for symbol in returns_matrix.columns:
-            symbol_vols[symbol] = returns_matrix[symbol].rolling(window=self.window).std()
-        features['volatility'] = symbol_vols.mean(axis=1)
+            symbol_vols[symbol] = safe_rolling_std(returns_matrix[symbol])
 
-        def calculate_average_correlation(x):
-            if x.isnull().all().all():
-                return 0
-            corr_matrix = x.corr()
-            upper_tri = np.triu(corr_matrix.values, k=1)
-            valid_corrs = upper_tri[upper_tri != 0]
-            return np.mean(valid_corrs) if len(valid_corrs) > 0 else 0
+        features['volatility'] = symbol_vols.mean(axis=1).ffill().bfill()
+
+        def calculate_average_correlation(returns_window):
+            if isinstance(returns_window, pd.DataFrame) and not returns_window.empty:
+                corr_matrix = returns_window.corr()
+                upper_tri = np.triu(corr_matrix.values, k=1)
+                valid_corrs = upper_tri[np.triu_indices_from(upper_tri, k=1)]
+                return np.mean(valid_corrs) if len(valid_corrs) > 0 else 0
+            return 0
 
         correlations = []
         for i in range(len(returns_matrix)):
@@ -95,15 +106,16 @@ class MarketRegimeDetector:
             else:
                 correlations.append(0)
         features['avg_correlation'] = correlations
+        features['avg_correlation'] = features['avg_correlation'].ffill().bfill()
 
-        def hurst(ts):
-            """Calculate Hurst exponent for time series"""
-            if len(ts) < 20:
-                return np.nan
-            lags = range(2, min(len(ts) // 2, 20))
-            tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
-            reg = np.polyfit(np.log(lags), np.log(tau), 1)
-            return reg[0]
+        def calculate_trend_strength(returns_window):
+            if isinstance(returns_window, pd.Series) and len(returns_window) >= 20:
+                lags = range(2, min(len(returns_window) // 2, 20))
+                tau = [np.sqrt(np.std(np.subtract(returns_window[lag:], returns_window[:-lag])))
+                       for lag in lags]
+                reg = np.polyfit(np.log(lags), np.log(tau), 1)
+                return reg[0]
+            return 0
 
         symbol_trends = pd.DataFrame()
         for symbol in returns_matrix.columns:
@@ -112,36 +124,64 @@ class MarketRegimeDetector:
             for i in range(len(symbol_returns)):
                 if i >= self.window:
                     window_data = symbol_returns.iloc[i - self.window:i]
-                    trends.append(hurst(window_data.values))
+                    trends.append(calculate_trend_strength(window_data))
                 else:
-                    trends.append(np.nan)
+                    trends.append(0)
             symbol_trends[symbol] = trends
 
         features['trend_strength'] = symbol_trends.mean(axis=1)
+        features['trend_strength'] = features['trend_strength'].ffill().bfill()
 
-        return features.ffill().bfill()
+        features = features.ffill().bfill()
+        features = features.fillna(0)
 
-    def detect_regime(self, features: pd.DataFrame) -> np.ndarray:
-        """Detect market regime using clustering"""
-        standardized = (features - features.mean()) / features.std()
-        standardized = standardized.dropna()
+        return features
 
-        if len(standardized) == 0:
+    def detect_regime(self, features: pd.DataFrame) -> str:
+        """Detect market regime using clustering with proper error handling"""
+        try:
+            standardized = features.copy()
+            for col in standardized.columns:
+                if isinstance(standardized[col], pd.Series):
+                    mean = standardized[col].mean()
+                    std = standardized[col].std()
+                    if std > 0:
+                        standardized[col] = (standardized[col] - mean) / std
+                    else:
+                        standardized[col] = 0
+
+            standardized = standardized.fillna(0)
+
+            if len(standardized) == 0:
+                return 'Unknown'
+
+            regimes = self.kmeans.fit_predict(standardized)
+            if len(regimes) > 0:
+                return regimes[-1]
             return 'Unknown'
 
-        regimes = self.kmeans.fit_predict(standardized)
-        return regimes[-1]
+        except Exception as e:
+            logger.error(f"Error in regime detection: {str(e)}")
+            return 'Unknown'
 
     def classify_regime(self, regime_idx: int, features: pd.DataFrame) -> str:
         """Classify regime type based on characteristics"""
-        regime_features = features.iloc[regime_idx]
+        print(features.head(10))
+        if isinstance(regime_idx, int):
+            regime_features = features.iloc[regime_idx]
+        else:
+            regime_features = features.loc[regime_idx]
 
-        if regime_features['volatility'] > regime_features['volatility'].quantile(0.7):
-            if regime_features['avg_correlation'] > regime_features['avg_correlation'].quantile(0.7):
+        vol_threshold = features['volatility'].quantile(0.7)
+        corr_threshold = features['avg_correlation'].quantile(0.7)
+        trend_threshold = features['trend_strength'].quantile(0.7)
+
+        if regime_features['volatility'] > vol_threshold:
+            if regime_features['avg_correlation'] > corr_threshold:
                 return 'Crisis'
             return 'High Volatility'
 
-        if regime_features['trend_strength'] > regime_features['trend_strength'].quantile(0.7):
+        if regime_features['trend_strength'] > trend_threshold:
             return 'Trending'
 
         return 'Mean Reverting'

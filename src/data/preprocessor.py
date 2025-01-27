@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 from typing import List, Optional
 from scipy.stats import zscore
 from config.logging_config import logger
