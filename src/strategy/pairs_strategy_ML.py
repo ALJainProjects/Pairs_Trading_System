@@ -258,40 +258,91 @@ class MLPairsStrategy(BaseStrategy):
 
     def generate_signals(self, prices: pd.DataFrame) -> pd.DataFrame:
         """Generate trading signals using advanced ML models."""
+        # self.update_portfolio_value(prices)
+        # signals = pd.DataFrame(index=prices.index)
+        #
+        # if not self.pairs:
+        #     self.pairs = self._find_pairs(prices)
+        #
+        # for pair in self.pairs:
+        #     try:
+        #         asset1, asset2 = pair
+        #         if asset1 not in prices.columns or asset2 not in prices.columns:
+        #             continue
+        #
+        #         features = self.prepare_features(
+        #             prices[asset1],
+        #             prices[asset2]
+        #         ) # can be enhanced to use volume
+        #
+        #         if not self._trained:
+        #             labels = self.ml_model.create_advanced_spread_labels(
+        #                 prices[asset1],
+        #                 prices[asset2],
+        #                 lookback_window=self.lookback_window,
+        #                 zscore_threshold=self.zscore_threshold
+        #             )
+        #
+        #             model_metrics = time_series_cross_validation(
+        #                 model=self.ml_model,
+        #                 features=features,
+        #                 target=labels,
+        #                 model_name="RandomForestClassifier",
+        #                 n_splits=5
+        #             )
+        #             print(model_metrics)
+        #             self._trained = True
+        #
+        #         prediction_proba = self.ml_model.default_model.predict_proba(
+        #             self.ml_model.scaler.transform(features)
+        #         )
+        #         confidence = np.max(prediction_proba, axis=1)
+        #         predictions = self.ml_model.default_model.predict(
+        #             self.ml_model.scaler.transform(features)
+        #         )
+        #
+        #         if predictions[-1] != 0 and confidence[-1] >= self.model_confidence_threshold:
+        #             position_size = self.calculate_position_size(
+        #                 pair=pair,
+        #                 prices=prices,
+        #                 portfolio_value=self.current_portfolio_value,
+        #                 confidence=confidence[-1]
+        #             )
+        #             predictions = predictions * position_size
+        #
+        #         signals[pair] = np.where(
+        #             confidence >= self.model_confidence_threshold,
+        #             predictions,
+        #             0
+        #         )
+        #
+        #     except Exception as e:
+        #         logger.error(f"Error generating signals for {pair}: {str(e)}")
+        #         continue
+        #
+        # return signals
+        logger.info("Starting ML signal generation")
+
         self.update_portfolio_value(prices)
         signals = pd.DataFrame(index=prices.index)
 
         if not self.pairs:
+            logger.info("Finding trading pairs...")
             self.pairs = self._find_pairs(prices)
+            logger.info(f"Found {len(self.pairs)} pairs")
 
         for pair in self.pairs:
             try:
                 asset1, asset2 = pair
+                logger.debug(f"Processing {asset1}/{asset2}")
                 if asset1 not in prices.columns or asset2 not in prices.columns:
                     continue
 
                 features = self.prepare_features(
                     prices[asset1],
                     prices[asset2]
-                ) # can be enhanced to use volume
-
-                if not self._trained:
-                    labels = self.ml_model.create_advanced_spread_labels(
-                        prices[asset1],
-                        prices[asset2],
-                        lookback_window=self.lookback_window,
-                        zscore_threshold=self.zscore_threshold
-                    )
-
-                    model_metrics = time_series_cross_validation(
-                        model=self.ml_model,
-                        features=features,
-                        target=labels,
-                        model_name="RandomForestClassifier",
-                        n_splits=5
-                    )
-                    print(model_metrics)
-                    self._trained = True
+                )
+                logger.debug(f"Generated features for {asset1}/{asset2}")
 
                 prediction_proba = self.ml_model.default_model.predict_proba(
                     self.ml_model.scaler.transform(features)
@@ -300,26 +351,29 @@ class MLPairsStrategy(BaseStrategy):
                 predictions = self.ml_model.default_model.predict(
                     self.ml_model.scaler.transform(features)
                 )
+                logger.debug(f"Latest confidence: {confidence[-1]:.4f}")
 
-                if predictions[-1] != 0 and confidence[-1] >= self.model_confidence_threshold:
+                mask = confidence >= self.model_confidence_threshold
+                signal = np.zeros(len(predictions))
+                signal[mask] = predictions[mask]
+
+                if signal[-1] != 0:
                     position_size = self.calculate_position_size(
                         pair=pair,
                         prices=prices,
                         portfolio_value=self.current_portfolio_value,
                         confidence=confidence[-1]
                     )
-                    predictions = predictions * position_size
+                    signal = signal * position_size
+                    logger.info(f"Generated signal for {asset1}/{asset2}: {signal[-1]:.4f}")
 
-                signals[pair] = np.where(
-                    confidence >= self.model_confidence_threshold,
-                    predictions,
-                    0
-                )
+                signals[pair] = signal
 
             except Exception as e:
                 logger.error(f"Error generating signals for {pair}: {str(e)}")
                 continue
 
+        logger.info("Signal generation completed")
         return signals
 
     def _find_pairs(self, prices: pd.DataFrame) -> List[Tuple[str, str]]:

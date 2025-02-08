@@ -1,36 +1,29 @@
-"""
-Enhanced Statistical Pairs Trading Strategy
-
-Features:
-1. Multi-period cointegration voting
-2. Composite scoring system
-3. Regime detection and adaptation
-4. Enhanced signal generation using statistical indicators
-5. Clear position sizing for each leg
-6. Maintains BaseStrategy compatibility
-"""
-
-from typing import Dict, List, Tuple, Optional, Any, Union
+from enum import Enum
+from typing import Dict, List, Tuple, Optional
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
-
-from plotly.subplots import make_subplots
-from statsmodels.stats.multitest import multipletests
-from statsmodels.tsa.stattools import coint
-import plotly.graph_objects as go
-from pathlib import Path
-import json
-from sklearn.cluster import KMeans
+import os
 
 from src.strategy.base import BaseStrategy
 from src.models.statistical import StatisticalModel
 from config.logging_config import logger
 from config.settings import DATA_DIR
 
+
 @dataclass
 class RegimeMetrics:
-    """Track market regime characteristics"""
+    """
+    Track market regime characteristics and metrics.
+
+    Attributes:
+        volatility: Rolling volatility measure
+        correlation: Average pairwise correlation
+        trend_strength: Measure of trending behavior
+        regime_type: Classified market regime
+        start_date: Beginning of regime period
+        end_date: End of regime period (if known)
+    """
     volatility: float
     correlation: float
     trend_strength: float
@@ -38,37 +31,42 @@ class RegimeMetrics:
     start_date: pd.Timestamp
     end_date: Optional[pd.Timestamp] = None
 
-@dataclass
-class PairStats:
-    """Enhanced pair statistics with multi-period metrics"""
-    hedge_ratio: float
-    half_life: float
-    coint_pvalue: float
-    spread_zscore: float
-    spread_vol: float
-    correlation: float
-    last_update: pd.Timestamp
-    cointegration_votes: Dict[int, bool] = field(default_factory=dict)
-    composite_score: float = 0.0
-    regime_metrics: Optional[RegimeMetrics] = None
-    lookback_data: Dict[str, pd.Series] = field(default_factory=dict)
-    position_sizes: Dict[str, float] = field(default_factory=dict)
-
 class MarketRegimeDetector:
-    """Detect and analyze market regimes"""
+    """
+    Detect market regimes using statistical thresholds and indicators.
 
-    def __init__(self, n_regimes: int = 3, window: int = 63):
-        self.n_regimes = n_regimes
+    Uses rolling volatility, correlation, and trend metrics to classify
+    market regimes based on their statistical characteristics.
+    """
+
+    def __init__(self, window: int = 63):
+        """
+        Initialize regime detector.
+
+        Args:
+            window: Rolling window size for calculations in days
+        """
         self.window = window
-        self.kmeans = KMeans(n_clusters=n_regimes)
 
     def calculate_features(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Calculate regime detection features with proper Series handling"""
+        """
+        Calculate regime detection features from price data.
+
+        Args:
+            data: DataFrame with columns Date, Symbol, Adj_Close
+
+        Returns:
+            DataFrame with regime features:
+                - Rolling volatility
+                - Average correlation
+                - Trend strength
+                - Volume profile
+        """
         features = pd.DataFrame(index=data['Date'].unique())
 
         symbol_groups = data.groupby('Symbol')
-
         returns_by_symbol = {}
+
         for symbol, group in symbol_groups:
             group_sorted = group.sort_values('Date')
             returns_by_symbol[symbol] = pd.Series(
@@ -76,143 +74,253 @@ class MarketRegimeDetector:
                 index=group_sorted['Date']
             )
 
-        returns_matrix = pd.DataFrame(returns_by_symbol)
-        returns_matrix = returns_matrix.ffill().bfill()
+        returns_matrix = pd.DataFrame(returns_by_symbol).fillna(0)
 
-        def safe_rolling_std(x):
-            if isinstance(x, pd.Series):
-                return x.rolling(window=self.window).std()
-            return pd.Series(0, index=features.index)
+        features['volatility'] = returns_matrix.std(axis=1).rolling(window=self.window).mean()
 
-        symbol_vols = pd.DataFrame()
-        for symbol in returns_matrix.columns:
-            symbol_vols[symbol] = safe_rolling_std(returns_matrix[symbol])
+        features['correlation'] = returns_matrix.rolling(window=self.window).apply(self._calculate_correlation)
 
-        features['volatility'] = symbol_vols.mean(axis=1).ffill().bfill()
+        prices = data.pivot(index='Date', columns='Symbol', values='Adj_Close')
+        trends = prices.pct_change().rolling(window=self.window).mean()
+        features['trend_strength'] = trends.abs().mean(axis=1)
 
-        def calculate_average_correlation(returns_window):
-            if isinstance(returns_window, pd.DataFrame) and not returns_window.empty:
-                corr_matrix = returns_window.corr()
-                upper_tri = np.triu(corr_matrix.values, k=1)
-                valid_corrs = upper_tri[np.triu_indices_from(upper_tri, k=1)]
-                return np.mean(valid_corrs) if len(valid_corrs) > 0 else 0
+        volume_profile = data.pivot(index='Date', columns='Symbol', values='Volume')
+        features['volume_intensity'] = volume_profile.rolling(window=self.window).mean().mean(axis=1)
+
+        return features.ffill()
+
+    def _calculate_correlation(self, x: pd.DataFrame) -> float:
+        """
+        Calculate average pairwise correlation from returns matrix.
+
+        Args:
+            x: Returns matrix for correlation calculation
+
+        Returns:
+            float: Average correlation value
+        """
+        if len(x.columns) < 2:
             return 0
 
-        correlations = []
-        for i in range(len(returns_matrix)):
-            if i >= self.window:
-                window_data = returns_matrix.iloc[i - self.window:i]
-                correlations.append(calculate_average_correlation(window_data))
-            else:
-                correlations.append(0)
-        features['avg_correlation'] = correlations
-        features['avg_correlation'] = features['avg_correlation'].ffill().bfill()
-
-        def calculate_trend_strength(returns_window):
-            if isinstance(returns_window, pd.Series) and len(returns_window) >= 20:
-                lags = range(2, min(len(returns_window) // 2, 20))
-                tau = [np.sqrt(np.std(np.subtract(returns_window[lag:], returns_window[:-lag])))
-                       for lag in lags]
-                reg = np.polyfit(np.log(lags), np.log(tau), 1)
-                return reg[0]
-            return 0
-
-        symbol_trends = pd.DataFrame()
-        for symbol in returns_matrix.columns:
-            trends = []
-            symbol_returns = returns_matrix[symbol]
-            for i in range(len(symbol_returns)):
-                if i >= self.window:
-                    window_data = symbol_returns.iloc[i - self.window:i]
-                    trends.append(calculate_trend_strength(window_data))
-                else:
-                    trends.append(0)
-            symbol_trends[symbol] = trends
-
-        features['trend_strength'] = symbol_trends.mean(axis=1)
-        features['trend_strength'] = features['trend_strength'].ffill().bfill()
-
-        features = features.ffill().bfill()
-        features = features.fillna(0)
-
-        return features
+        corr_matrix = x.corr()
+        upper_tri = np.triu(corr_matrix.values, k=1)
+        return np.mean(upper_tri[np.triu_indices_from(upper_tri, k=1)])
 
     def detect_regime(self, features: pd.DataFrame) -> str:
-        """Detect market regime using clustering with proper error handling"""
+        """
+        Detect current market regime using statistical thresholds.
+
+        Args:
+            features: DataFrame of calculated regime features
+
+        Returns:
+            str: Classified regime type
+        """
         try:
-            standardized = features.copy()
-            for col in standardized.columns:
-                if isinstance(standardized[col], pd.Series):
-                    mean = standardized[col].mean()
-                    std = standardized[col].std()
-                    if std > 0:
-                        standardized[col] = (standardized[col] - mean) / std
-                    else:
-                        standardized[col] = 0
+            current = features.iloc[-1]
 
-            standardized = standardized.fillna(0)
+            vol_extreme = features['volatility'].quantile(0.9)
+            vol_high = features['volatility'].quantile(0.7)
+            vol_low = features['volatility'].quantile(0.3)
 
-            if len(standardized) == 0:
-                return 'Unknown'
+            corr_high = features['correlation'].quantile(0.7)
+            corr_low = features['correlation'].quantile(0.3)
 
-            regimes = self.kmeans.fit_predict(standardized)
-            if len(regimes) > 0:
-                return regimes[-1]
-            return 'Unknown'
+            trend_strong = features['trend_strength'].quantile(0.7)
+            trend_weak = features['trend_strength'].quantile(0.3)
+
+            volume_high = features['volume_intensity'].quantile(0.7)
+
+            return self._classify_regime(
+                current['volatility'],
+                current['correlation'],
+                current['trend_strength'],
+                current['volume_intensity'],
+                vol_extreme, vol_high, vol_low,
+                corr_high, corr_low,
+                trend_strong, trend_weak,
+                volume_high
+            )
 
         except Exception as e:
             logger.error(f"Error in regime detection: {str(e)}")
             return 'Unknown'
 
-    def classify_regime(self, regime_idx: int, features: pd.DataFrame) -> str:
-        """Classify regime type based on characteristics"""
-        print(features.head(10))
-        if isinstance(regime_idx, int):
-            regime_features = features.iloc[regime_idx]
-        else:
-            regime_features = features.loc[regime_idx]
+    def _classify_regime(
+            self,
+            vol: float,
+            corr: float,
+            trend: float,
+            volume: float,
+            vol_extreme: float,
+            vol_high: float,
+            vol_low: float,
+            corr_high: float,
+            corr_low: float,
+            trend_strong: float,
+            trend_weak: float,
+            volume_high: float
+    ) -> str:
+        """
+        Classify market regime based on feature thresholds.
 
-        vol_threshold = features['volatility'].quantile(0.7)
-        corr_threshold = features['avg_correlation'].quantile(0.7)
-        trend_threshold = features['trend_strength'].quantile(0.7)
+        Args:
+            vol: Current volatility
+            corr: Current correlation
+            trend: Current trend strength
+            volume: Current volume intensity
+            vol_extreme: 90th percentile volatility threshold
+            vol_high: 70th percentile volatility threshold
+            vol_low: 30th percentile volatility threshold
+            corr_high: 70th percentile correlation threshold
+            corr_low: 30th percentile correlation threshold
+            trend_strong: 70th percentile trend threshold
+            trend_weak: 30th percentile trend threshold
+            volume_high: 70th percentile volume threshold
 
-        if regime_features['volatility'] > vol_threshold:
-            if regime_features['avg_correlation'] > corr_threshold:
-                return 'Crisis'
+        Returns:
+            str: Classified regime type
+        """
+        if vol > vol_extreme and corr > corr_high:
+            return 'Crisis'
+
+        if vol > vol_high:
+            if corr > corr_high:
+                if volume > volume_high:
+                    return 'Panic'
+                return 'Risk-Off'
             return 'High Volatility'
 
-        if regime_features['trend_strength'] > trend_threshold:
+        if trend > trend_strong:
+            if corr > corr_high:
+                return 'Strong Trend'
+            if vol < vol_low:
+                return 'Low Vol Trend'
             return 'Trending'
+
+        if vol < vol_low:
+            if corr < corr_low:
+                return 'Low Risk'
+            if trend < trend_weak:
+                return 'Range Bound'
+            return 'Quiet'
+
+        if trend < trend_weak and corr < corr_low:
+            return 'Rotational'
 
         return 'Mean Reverting'
 
+
+@dataclass
+class PairStats:
+    """
+    Stores statistical metrics and position information for a trading pair.
+
+    Attributes:
+        hedge_ratio: The beta coefficient used to hedge the pair
+        half_life: Mean reversion speed measure in days
+        coint_pvalue: Cointegration test p-value
+        spread_zscore: Current z-score of the spread
+        spread_vol: Volatility of the spread
+        correlation: Price correlation between assets
+        last_update: Timestamp of last update
+        composite_score: Combined ranking score
+        position_sizes: Current position sizes for each asset
+    """
+    hedge_ratio: float
+    half_life: float
+    coint_pvalue: float
+    spread_zscore: float
+    spread_vol: float
+    correlation: float
+    last_update: pd.Timestamp
+    composite_score: float = 0.0
+    position_sizes: Dict[str, float] = field(default_factory=dict)
+
+
+class PositionType(Enum):
+    """
+    Defines allowed position types for the strategy.
+
+    Values:
+        LONG_ONLY: Only long positions allowed
+        SHORT_ONLY: Only short positions allowed
+        MARKET_NEUTRAL: Both long and short positions allowed
+    """
+    LONG_ONLY = "long_only"
+    SHORT_ONLY = "short_only"
+    MARKET_NEUTRAL = "market_neutral"
+
+
 class EnhancedStatPairsStrategy(BaseStrategy):
-    """Enhanced statistical pairs trading strategy"""
+    """
+    Statistical arbitrage strategy using mean reversion signals.
+
+    This strategy implements a pairs trading approach based on statistical arbitrage principles.
+    It monitors the spread between pairs of assets for mean reversion opportunities and
+    generates trading signals when the spread deviates significantly from its mean.
+
+    Key features:
+    - Cointegration-based pair selection
+    - Z-score based entry and exit signals
+    - Multiple exit conditions including stop-loss
+    - Position sizing based on volatility and correlation
+    - Comprehensive trade tracking and analysis
+
+    The strategy can operate in long-only, short-only, or market-neutral modes.
+    """
 
     def __init__(
             self,
             lookback_window: int = 252,
             zscore_entry: float = 2.0,
-            zscore_exit: float = 0.0,
+            zscore_exit: float = 0.5,
             min_half_life: int = 5,
             max_half_life: int = 126,
-            max_spread_vol: float = 0.1,
-            min_correlation: float = 0.5,
+            max_spread_vol: float = 0.12,
+            min_correlation: float = 0.45,
             coint_threshold: float = 0.05,
-            max_pairs: int = 10,
+            max_pairs: int = 5,
             position_size: float = 0.1,
-            stop_loss: float = 0.02,
+            stop_loss: float = 0.05,  # Increased from 0.02
+            trailing_stop: float = 0.03,  # New parameter
+            time_stop: int = 21,  # New parameter - minimum holding period
+            profit_take: float = 0.1,  # New parameter
             max_drawdown: float = 0.2,
+            close_on_signal_flip: bool = False,  # Changed from True
+            signal_exit_threshold: float = 0.5,  # Increased from 0.3
+            confirmation_periods: int = 3,  # Increased from 2
+            close_on_regime_change: bool = True,
             cointegration_windows: List[int] = None,
             min_votes: int = None,
             regime_adaptation: bool = True,
-
-            close_on_signal_flip: bool = True,
-            signal_exit_threshold: float = 0.3,
-            confirmation_periods: int = 2,
-            close_on_regime_change: bool = True
+            position_type: PositionType = PositionType.MARKET_NEUTRAL
     ):
-        """Initialize strategy with enhanced parameters"""
+        """
+        Initialize the pairs trading strategy with specified parameters.
+
+        Args:
+            lookback_window: Days of historical data for calculations
+            zscore_entry: Z-score threshold for position entry
+            zscore_exit: Z-score threshold for position exit
+            min_half_life: Minimum mean reversion half-life in days
+            max_half_life: Maximum mean reversion half-life in days
+            max_spread_vol: Maximum allowed spread volatility
+            min_correlation: Minimum required correlation between pairs
+            coint_threshold: Maximum p-value for cointegration test
+            max_pairs: Maximum number of pairs to trade
+            position_size: Base position size as fraction of portfolio
+            stop_loss: Stop loss threshold as fraction of position value
+            max_drawdown: Maximum allowed drawdown before reducing exposure
+            cointegration_windows: List of windows for cointegration testing
+            min_votes: Minimum required cointegration votes
+            regime_adaptation: Whether to adapt to market regimes
+            position_type: Type of positions allowed (long/short/neutral)
+            close_on_signal_flip: Whether to close on signal reversal
+            signal_exit_threshold: Secondary signal threshold for exits
+            confirmation_periods: Required periods for signal confirmation
+            close_on_regime_change: Whether to close on regime changes
+        """
         super().__init__(
             name="EnhancedStatPairs",
             max_position_size=position_size,
@@ -220,6 +328,7 @@ class EnhancedStatPairsStrategy(BaseStrategy):
             transaction_cost_pct=0.001
         )
 
+        # Core parameters
         self.lookback_window = lookback_window
         self.zscore_entry = zscore_entry
         self.zscore_exit = zscore_exit
@@ -228,416 +337,482 @@ class EnhancedStatPairsStrategy(BaseStrategy):
         self.max_spread_vol = max_spread_vol
         self.min_correlation = min_correlation
         self.coint_threshold = coint_threshold
+        self.position_type = position_type
         self.max_pairs = max_pairs
         self.position_size = position_size
+
+        # Enhanced risk parameters
         self.stop_loss = stop_loss
+        self.trailing_stop = trailing_stop
+        self.time_stop = time_stop
+        self.profit_take = profit_take
         self.max_drawdown = max_drawdown
 
-        self.cointegration_windows = cointegration_windows or [63, 126, 252]
-        self.min_votes = min_votes or (len(self.cointegration_windows) // 2 + 1)
-        self.regime_adaptation = regime_adaptation
-
-        self.calculator = StatisticalModel()
-        self.regime_detector = MarketRegimeDetector()
-        self.pairs: List[Tuple[str, str]] = []
-        self.positions: Dict[Tuple[str, str], PairStats] = {}
-        self.trades: List[Dict] = []
-
-        self.current_regime: Optional[RegimeMetrics] = None
-
-
+        # Signal parameters
         self.close_on_signal_flip = close_on_signal_flip
         self.signal_exit_threshold = signal_exit_threshold
         self.confirmation_periods = confirmation_periods
         self.close_on_regime_change = close_on_regime_change
 
-        self.signal_history: Dict[Tuple[str, str], pd.DataFrame] = {}
+        # Additional parameters
+        self.cointegration_windows = cointegration_windows or [63, 126, 252]
+        self.min_votes = min_votes or (len(self.cointegration_windows) // 2 + 1)
+        self.regime_adaptation = regime_adaptation
 
-    def test_cointegration_multiple_periods(
-            self,
-            price1: pd.Series,
-            price2: pd.Series) -> Dict[int, bool]:
-        """Test cointegration across multiple lookback periods"""
-        votes = {}
+        # Initialize components
+        self.calculator = StatisticalModel()
+        self.pairs: List[Tuple[str, str]] = []
+        self.positions: Dict[Tuple[str, str], PairStats] = {}
+        self.trades: List[Dict] = []
+        self.zscore_history: Dict[Tuple[str, str], List[float]] = {}
+        self.position_age: Dict[Tuple[str, str], int] = {}
+        self.max_prices: Dict[Tuple[str, str], Dict[str, float]] = {}
+        self.entry_prices: Dict[Tuple[str, str], Dict[str, float]] = {}
 
-        for window in self.cointegration_windows:
-            if len(price1) < window or len(price2) < window:
-                continue
-
-            try:
-                _, pvalue, _ = coint(
-                    price1.iloc[-window:],
-                    price2.iloc[-window:],
-                    maxlag=min(window // 10, 20),
-                    trend='c'
-                )
-                votes[window] = pvalue < self.coint_threshold
-            except:
-                votes[window] = False
-
-        return votes
-
-    def plot_pair_analysis(self, prices: pd.DataFrame, output_dir: Optional[Path] = None) -> None:
-        """Plot comprehensive pair analysis with regime information"""
-        if not self.pairs:
-            logger.warning("No pairs available for plotting")
-            return
-
-        for pair in self.pairs:
-            try:
-                asset1, asset2 = pair
-                stats = self.positions.get(pair)
-                if not stats:
-                    continue
-
-                returns1 = prices[asset1].pct_change()
-                returns2 = prices[asset2].pct_change()
-                spread = prices[asset1] - stats.hedge_ratio * prices[asset2]
-
-                fig = make_subplots(
-                    rows=3, cols=2,
-                    subplot_titles=(
-                        'Asset Prices',
-                        'Returns Correlation',
-                        'Spread Z-Score',
-                        'Rolling Volatility',
-                        'Regime Analysis',
-                        'Position Sizes'
-                    ),
-                    vertical_spacing=0.1,
-                    horizontal_spacing=0.1
-                )
-
-                fig.add_trace(
-                    go.Scatter(x=prices.index, y=prices[asset1], name=asset1),
-                    row=1, col=1
-                )
-                fig.add_trace(
-                    go.Scatter(x=prices.index, y=prices[asset2], name=asset2),
-                    row=1, col=1
-                )
-
-                rolling_corr = returns1.rolling(63).corr(returns2)
-                fig.add_trace(
-                    go.Scatter(x=prices.index, y=rolling_corr, name='Rolling Correlation'),
-                    row=1, col=2
-                )
-
-                zscore = self.calculator.calculate_spread_zscore(spread)
-                fig.add_trace(
-                    go.Scatter(x=prices.index, y=zscore, name='Z-Score'),
-                    row=2, col=1
-                )
-
-                fig.add_hline(y=self.zscore_entry, line_dash="dash", row=2, col=1)
-                fig.add_hline(y=-self.zscore_entry, line_dash="dash", row=2, col=1)
-
-                roll_vol = returns1.rolling(21).std() * np.sqrt(252)
-                fig.add_trace(
-                    go.Scatter(x=prices.index, y=roll_vol, name=f'{asset1} Volatility'),
-                    row=2, col=2
-                )
-                roll_vol2 = returns2.rolling(21).std() * np.sqrt(252)
-                fig.add_trace(
-                    go.Scatter(x=prices.index, y=roll_vol2, name=f'{asset2} Volatility'),
-                    row=2, col=2
-                )
-
-                if stats.regime_metrics:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=[stats.regime_metrics.start_date],
-                            y=[stats.regime_metrics.volatility],
-                            mode='markers+text',
-                            text=[stats.regime_metrics.regime_type],
-                            textposition="top center",
-                            name='Current Regime'
-                        ),
-                        row=3, col=1
-                    )
-
-                if stats.position_sizes:
-                    fig.add_trace(
-                        go.Bar(
-                            x=[asset1, asset2],
-                            y=[stats.position_sizes['asset1'], stats.position_sizes['asset2']],
-                            name='Position Sizes'
-                        ),
-                        row=3, col=2
-                    )
-
-                fig.update_layout(
-                    height=1200,
-                    title_text=f"Pair Analysis: {asset1}/{asset2}",
-                    showlegend=True
-                )
-
-                if output_dir:
-                    fig.write_html(output_dir / f"pair_analysis_{asset1}_{asset2}.html")
-                else:
-                    fig.show()
-
-            except Exception as e:
-                logger.error(f"Error plotting pair analysis for {pair}: {str(e)}")
-
-    def calculate_composite_score(
+    def _check_exit_conditions(
             self,
             pair: Tuple[str, str],
-            stats: PairStats,
-            prices: pd.DataFrame) -> float:
-        """Calculate composite score combining multiple metrics"""
-        try:
-            coint_score = sum(stats.cointegration_votes.values()) / len(stats.cointegration_votes)
+            current_prices: Dict[str, float],
+            zscore: float,
+            current_pos: float
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Enhanced exit condition checking with new parameters.
+        """
+        if pair not in self.position_age:
+            return False, None
 
-            asset1, asset2 = pair
-            asset1_data = prices[prices['Symbol'] == asset1].sort_values('Date')
-            asset2_data = prices[prices['Symbol'] == asset2].sort_values('Date')
+        position_age = self.position_age[pair]
 
-            returns1 = asset1_data['Adj_Close'].pct_change()
-            returns2 = asset2_data['Adj_Close'].pct_change()
+        # Don't check stops during minimum holding period
+        if position_age < self.time_stop:
+            return False, None
 
-            rolling_corr = pd.Series(index=returns1.index)
-            for i in range(63, len(returns1)):
-                rolling_corr.iloc[i] = returns1.iloc[i - 63:i].corr(returns2.iloc[i - 63:i])
+        entry_prices = self.entry_prices[pair]
+        max_prices = self.max_prices[pair]
 
-            corr_stability = 1 - rolling_corr.std()
+        # Calculate returns for each asset
+        returns = {}
+        for asset in ['asset1', 'asset2']:
+            current = current_prices[asset]
+            entry = entry_prices[asset]
+            returns[asset] = (current - entry) / entry if entry != 0 else 0
 
-            hl_score = 1 - abs(stats.half_life - np.mean([self.min_half_life, self.max_half_life])) / (
-                        self.max_half_life - self.min_half_life)
-            vol_score = 1 - (stats.spread_vol / self.max_spread_vol)
+        # Calculate position-weighted return
+        position_sizes = self.positions[pair].position_sizes
+        total_return = sum(returns[asset] * position_sizes[asset]
+                           for asset in ['asset1', 'asset2'])
 
-            weights = {
-                'cointegration': 0.4,
-                'correlation': 0.2,
-                'half_life': 0.2,
-                'volatility': 0.2
-            }
+        # Calculate trailing returns
+        trailing_returns = {}
+        for asset in ['asset1', 'asset2']:
+            current = current_prices[asset]
+            peak = max_prices[asset]
+            trailing_returns[asset] = (current - peak) / peak if peak != 0 else 0
 
-            composite_score = (
-                    weights['cointegration'] * coint_score +
-                    weights['correlation'] * corr_stability +
-                    weights['half_life'] * hl_score +
-                    weights['volatility'] * vol_score
-            )
+        # Calculate position-weighted trailing return
+        trailing_total = sum(trailing_returns[asset] * position_sizes[asset]
+                             for asset in ['asset1', 'asset2'])
 
-            return float(composite_score)
+        # Check profit target
+        if total_return >= self.profit_take:
+            return True, "Profit Target"
 
-        except Exception as e:
-            logger.error(f"Error calculating composite score: {str(e)}")
+        # Check stop loss
+        if total_return <= -self.stop_loss:
+            return True, "Stop Loss"
+
+        # Check trailing stop for profitable positions
+        if max(max_prices.values()) > max(entry_prices.values()):
+            if trailing_total <= -self.trailing_stop:
+                return True, "Trailing Stop"
+
+        # Check z-score exit with confirmation
+        if (abs(zscore) <= self.zscore_exit and
+                self._confirm_exit_signal(pair, zscore)):
+            return True, "Z-Score Exit"
+
+        return False, None
+
+    def _confirm_exit_signal(self, pair: Tuple[str, str], zscore: float) -> bool:
+        """
+        Require multiple periods of confirmation before exit.
+        """
+        if pair not in self.zscore_history:
+            self.zscore_history[pair] = []
+            return False
+
+        recent_scores = self.zscore_history[pair][-self.confirmation_periods:]
+        if len(recent_scores) < self.confirmation_periods:
+            return False
+
+        # Check if z-score has been consistently near exit threshold
+        confirm_count = sum(1 for z in recent_scores
+                            if abs(z) <= self.zscore_exit * 1.2)
+        return confirm_count >= self.confirmation_periods * 0.8
+
+    def _record_trade(self, pair: Tuple[str, str], date: pd.Timestamp, reason: str,
+                      current_pos: float, asset1_data: pd.Series, asset2_data: pd.Series,
+                      zscore: float, pnl: float = None) -> None:
+        """
+        Record details of a trade execution.
+
+        Args:
+            pair: Tuple of asset symbols
+            date: Trade execution timestamp
+            reason: Reason for the trade (entry/exit)
+            current_pos: Current position size
+            asset1_data: Price data for first asset
+            asset2_data: Price data for second asset
+            zscore: Current z-score at trade time
+            pnl: Profit/loss if known (for exits)
+        """
+        asset1, asset2 = pair
+        stats = self.positions.get(pair)
+
+        trade_info = {
+            'Date': date,
+            'Pair': f"{asset1}/{asset2}",
+            'Action': 'EXIT' if current_pos != 0 else 'ENTRY',
+            'Signal': -current_pos if current_pos != 0 else current_pos,
+            'ZScore': zscore,
+            'Price1': asset1_data.iloc[-1],
+            'Price2': asset2_data.iloc[-1],
+            'Position1': stats.position_sizes['asset1'] if stats else 0,
+            'Position2': stats.position_sizes['asset2'] if stats else 0,
+        }
+
+        if trade_info['Action'] == 'EXIT':
+            trade_info['ExitReason'] = reason
+            if pnl is not None:
+                trade_info['PnL'] = pnl
+
+        self.trades.append(trade_info)
+
+    def generate_signals(self, prices: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generate trading signals for all pairs.
+
+        Processes historical price data to generate entry and exit signals.
+        Handles position management including exits based on multiple criteria:
+        - Z-score mean reversion
+        - Stop losses
+        - Signal reversals
+
+        Args:
+            prices: DataFrame with price history for all assets
+
+        Returns:
+            DataFrame with signals (-1, 0, 1) for each pair
+        """
+        dates = prices['Date'].unique()
+        columns = pd.MultiIndex.from_tuples(self.pairs, names=['asset1', 'asset2'])
+        signals = pd.DataFrame(0, index=dates, columns=columns)
+
+        for date in dates:
+            historical_data = prices[prices['Date'] <= date].copy()
+
+            for pair in self.pairs:
+                try:
+                    asset1, asset2 = pair
+
+                    # Get asset data
+                    asset1_data = historical_data[historical_data['Symbol'] == asset1].set_index('Date')['Adj_Close']
+                    asset2_data = historical_data[historical_data['Symbol'] == asset2].set_index('Date')['Adj_Close']
+                    asset1_data, asset2_data = asset1_data.align(asset2_data, join='inner')
+
+                    if len(asset1_data) < self.lookback_window:
+                        continue
+
+                    # Calculate core metrics
+                    hedge_ratio = self.calculator.calculate_hedge_ratio(asset1_data, asset2_data)
+                    spread = self.calculator.calculate_spread(asset1_data, asset2_data)
+                    zscore = self.calculator.calculate_spread_zscore(spread)
+                    current_zscore = zscore.iloc[-1]
+
+                    # Update zscore history
+                    if pair not in self.zscore_history:
+                        self.zscore_history[pair] = []
+                    self.zscore_history[pair].append(current_zscore)
+
+                    # Generate signals
+                    mr_signal = self.calculator.mean_reversion_signal(
+                        spread, window=21, z_threshold=self.zscore_entry
+                    )
+                    bb_signal = self.calculator.bollinger_band_signal(
+                        spread, window=21, num_std_dev=self.zscore_entry
+                    )
+
+                    current_signal = 0
+                    if mr_signal.iloc[-1] == bb_signal.iloc[-1] and mr_signal.iloc[-1] != 0:
+                        current_signal = mr_signal.iloc[-1]
+
+                    # Position management
+                    current_prices = {
+                        'asset1': asset1_data.iloc[-1],
+                        'asset2': asset2_data.iloc[-1]
+                    }
+
+                    if pair in self.positions:
+                        prev_signals = signals.loc[signals.index < date, pair]
+                        current_pos = prev_signals.iloc[-1] if len(prev_signals) > 0 else 0
+
+                        # Update position age and max prices
+                        self.position_age[pair] = self.position_age.get(pair, 0) + 1
+
+                        if pair in self.max_prices:
+                            self.max_prices[pair] = {
+                                'asset1': max(self.max_prices[pair]['asset1'], current_prices['asset1']),
+                                'asset2': max(self.max_prices[pair]['asset2'], current_prices['asset2'])
+                            }
+
+                        # Check exit conditions
+                        exit_flag, exit_reason = self._check_exit_conditions(
+                            pair, current_prices, current_zscore, current_pos
+                        )
+
+                        if exit_flag:
+                            signals.loc[date, pair] = 0
+                            self._record_trade(
+                                pair, date, exit_reason, current_pos,
+                                asset1_data, asset2_data, current_zscore,
+                                self._calculate_pnl(pair, current_prices)
+                            )
+
+                            # Reset position tracking
+                            if pair in self.positions:
+                                del self.positions[pair]
+                            if pair in self.position_age:
+                                del self.position_age[pair]
+                            if pair in self.max_prices:
+                                del self.max_prices[pair]
+                            if pair in self.entry_prices:
+                                del self.entry_prices[pair]
+
+                            continue
+
+                    # Update or enter new position
+                    signals.loc[date, pair] = current_signal
+
+                    if current_signal != 0:
+                        # Initialize or update position tracking
+                        if pair not in self.entry_prices:
+                            self.entry_prices[pair] = current_prices.copy()
+                        if pair not in self.max_prices:
+                            self.max_prices[pair] = current_prices.copy()
+                        if pair not in self.position_age:
+                            self.position_age[pair] = 0
+
+                        # Update position stats
+                        stats = PairStats(
+                            hedge_ratio=hedge_ratio,
+                            half_life=self.calculator.calculate_half_life(spread),
+                            coint_pvalue=0.0,
+                            spread_zscore=current_zscore,
+                            spread_vol=spread.std(),
+                            correlation=asset1_data.pct_change().corr(asset2_data.pct_change()),
+                            last_update=pd.Timestamp(date),
+                            position_sizes=self.calculate_position_sizes_v2(
+                                pair, current_signal, historical_data
+                            )
+                        )
+                        self.positions[pair] = stats
+
+                except Exception as e:
+                    logger.error(f"Error generating signals for pair {pair}: {str(e)}")
+                    signals.loc[date, pair] = 0
+
+        return signals
+
+    def _calculate_pnl(self, pair: Tuple[str, str], current_prices: Dict[str, float]) -> float:
+        """Calculate PnL for a position."""
+        if pair not in self.positions or pair not in self.entry_prices:
             return 0.0
+
+        position_sizes = self.positions[pair].position_sizes
+        entry_prices = self.entry_prices[pair]
+
+        pnl = 0.0
+        for asset in ['asset1', 'asset2']:
+            price_change = (current_prices[asset] - entry_prices[asset]) / entry_prices[asset]
+            pnl += price_change * position_sizes[asset]
+
+        return pnl
 
     def calculate_position_sizes_v2(
             self,
             pair: Tuple[str, str],
             signal: float,
             prices: pd.DataFrame) -> Dict[str, float]:
-        """Calculate actual position sizes for each leg"""
-        try:
-            asset1, asset2 = pair
-            stats = self.positions.get(pair)
+        """
+        Calculate position sizes for each asset in a pair.
 
-            if not stats:
+        Determines the optimal position sizes based on the trading signal,
+        asset prices, and hedge ratio. Implements risk controls based on
+        the strategy's position type constraints.
+
+        Args:
+            pair: Tuple of asset symbols
+            signal: Trading signal (-1, 0, 1)
+            prices: DataFrame with current price data
+
+        Returns:
+            Dictionary with position sizes for each asset
+
+        Raises:
+            Exception: If error occurs during calculation
+        """
+        try:
+            if ((self.position_type == PositionType.LONG_ONLY and signal < 0) or
+                    (self.position_type == PositionType.SHORT_ONLY and signal > 0)):
                 return {'asset1': 0.0, 'asset2': 0.0}
 
-            latest_prices = prices[prices['Date'] == prices['Date'].max()]
-            price1 = latest_prices[latest_prices['Symbol'] == asset1]['Adj_Close'].iloc[0]
-            price2 = latest_prices[latest_prices['Symbol'] == asset2]['Adj_Close'].iloc[0]
+            asset1, asset2 = pair
+            asset1_price = prices[prices['Symbol'] == asset1]['Adj_Close'].iloc[-1]
+            asset2_price = prices[prices['Symbol'] == asset2]['Adj_Close'].iloc[-1]
 
-            pair_value = price1 + stats.hedge_ratio * price2
+            hedge_ratio = self.calculator.calculate_hedge_ratio(
+                prices[prices['Symbol'] == asset1]['Adj_Close'],
+                prices[prices['Symbol'] == asset2]['Adj_Close']
+            )
+
             base_position = self.position_size * signal
+            notional1 = base_position * asset1_price
+            notional2 = notional1 * hedge_ratio
 
-            if self.regime_adaptation and stats.regime_metrics:
-                regime = stats.regime_metrics.regime_type
-                if regime == 'Crisis':
-                    base_position *= 0.5
-                elif regime == 'High Volatility':
-                    base_position *= 0.75
-                elif regime == 'Trending':
-                    base_position *= 0.9
-
-            notional_value = pair_value * base_position
-            shares1 = np.floor(notional_value / price1)
-            shares2 = np.floor(notional_value * stats.hedge_ratio / price2)
+            shares1 = np.floor(notional1 / asset1_price)
+            shares2 = np.floor(notional2 / asset2_price)
 
             return {
                 'asset1': shares1,
-                'asset2': -shares2 * stats.hedge_ratio
+                'asset2': -shares2 * hedge_ratio
             }
 
         except Exception as e:
             logger.error(f"Error calculating position sizes: {str(e)}")
             return {'asset1': 0.0, 'asset2': 0.0}
 
-    def generate_signals(self, prices: pd.DataFrame) -> Union[pd.DataFrame, Dict[Tuple[str, str], pd.Series]]:
-        """Generate trading signals for pairs"""
-        dates = prices['Date'].unique()
-        signals = pd.DataFrame(index=dates, columns=self.pairs)
+    def find_pairs(self, prices: pd.DataFrame) -> List[Tuple[str, str]]:
+        """
+        Identify cointegrated pairs suitable for trading.
 
-        if not self.pairs:
-            self.pairs = self.find_pairs(prices)
+        Analyzes price data to find asset pairs that exhibit statistical
+        properties suitable for pairs trading:
+        - Cointegration relationship
+        - Acceptable correlation
+        - Mean reversion characteristics within defined bounds
 
-        if self.regime_adaptation:
-            regime_features = self.regime_detector.calculate_features(prices)
-            current_regime_type = self.regime_detector.classify_regime(-1, regime_features)
+        Args:
+            prices: DataFrame with price history for all assets
 
-            self.current_regime = RegimeMetrics(
-                volatility=regime_features['volatility'].iloc[-1],
-                correlation=regime_features['avg_correlation'].iloc[-1],
-                trend_strength=regime_features['trend_strength'].iloc[-1],
-                regime_type=current_regime_type,
-                start_date=prices['Date'].max()
-            )
+        Returns:
+            List of tuples containing valid trading pairs
 
-        for date in dates:
-            date_mask = prices['Date'] <= date
-            historical_data = prices[date_mask]
+        Note:
+            Filters pairs based on strategy parameters:
+            - Cointegration threshold
+            - Minimum correlation
+            - Half-life bounds
+            - Maximum number of pairs
+        """
+        valid_pairs = []
+        symbols = prices['Symbol'].unique()
 
-            for pair in self.pairs:
+        for i in range(len(symbols)):
+            for j in range(i + 1, len(symbols)):
+                asset1, asset2 = symbols[i], symbols[j]
                 try:
-                    asset1, asset2 = pair
+                    asset1_prices = prices[prices['Symbol'] == asset1].sort_values('Date')['Adj_Close']
+                    asset2_prices = prices[prices['Symbol'] == asset2].sort_values('Date')['Adj_Close']
 
-                    asset1_data = historical_data[historical_data['Symbol'] == asset1]['Adj_Close']
-                    asset2_data = historical_data[historical_data['Symbol'] == asset2]['Adj_Close']
-
-                    votes = self.test_cointegration_multiple_periods(
-                        asset1_data,
-                        asset2_data
+                    is_cointegrated = self.calculator.cointegration_test(
+                        asset1_prices,
+                        asset2_prices,
+                        significance=self.coint_threshold
                     )
 
-                    if sum(votes.values()) < self.min_votes:
-                        signals.loc[date, pair] = 0
+                    if not is_cointegrated:
                         continue
 
-                    hedge_ratio = self.calculator.calculate_hedge_ratio(
-                        asset1_data,
-                        asset2_data
-                    )
+                    correlation = asset1_prices.pct_change().corr(asset2_prices.pct_change())
+                    spread = self.calculator.calculate_spread(asset1_prices, asset2_prices)
+                    half_life = self.calculator.calculate_half_life(spread)
 
-                    spread = asset1_data - hedge_ratio * asset2_data
+                    if (correlation >= self.min_correlation and
+                            self.min_half_life <= half_life <= self.max_half_life):
+                        valid_pairs.append((asset1, asset2))
 
-                    asset1_returns = asset1_data.pct_change()
-                    asset2_returns = asset2_data.pct_change()
-                    correlation = asset1_returns.corr(asset2_returns)
-
-                    stats = PairStats(
-                        hedge_ratio=hedge_ratio,
-                        half_life=self.calculator.calculate_half_life(spread),
-                        coint_pvalue=min(v for v in votes.values()),
-                        spread_zscore=self.calculator.calculate_spread_zscore(spread),
-                        spread_vol=spread.std(),
-                        correlation=correlation,
-                        last_update=date,
-                        cointegration_votes=votes,
-                        regime_metrics=self.current_regime if self.regime_adaptation else None,
-                        lookback_data={'spread': spread}
-                    )
-
-                    stats.composite_score = self.calculate_composite_score(pair, stats, historical_data)
-                    self.positions[pair] = stats
-
-                    signal = self.generate_enhanced_signals(spread, stats)
-
-                    if signal != 0:
-                        position_sizes = self.calculate_position_sizes_v2(pair, signal, historical_data)
-                        stats.position_sizes = position_sizes
-                        signals.loc[date, pair] = signal
-                    else:
-                        signals.loc[date, pair] = signals.loc[date, pair].shift(1).fillna(0)
+                    if len(valid_pairs) >= self.max_pairs:
+                        break
 
                 except Exception as e:
-                    logger.error(f"Error generating signals for pair {pair} at {date}: {str(e)}")
-                    signals.loc[date, pair] = 0
+                    logger.warning(f"Error analyzing pair {asset1}-{asset2}: {str(e)}")
+                    continue
 
-        return signals
-
-    def generate_enhanced_signals(
-            self,
-            spread: pd.Series,
-            stats: PairStats) -> float:
-        """Generate trading signals using multiple indicators"""
-        try:
-            mr_signal = self.calculator.mean_reversion_signal(
-                spread,
-                window=21,
-                z_threshold=self.zscore_entry
-            ).iloc[-1]
-
-            bb_signal = self.calculator.bollinger_band_signal(
-                spread,
-                window=21,
-                num_std_dev=2.0
-            ).iloc[-1]
-
-            rsi_signal = self.calculator.rsi_signal(
-                spread,
-                window=14,
-                lower_threshold=30,
-                upper_threshold=70
-            ).iloc[-1]
-
-            weights = {'mr': 0.4, 'bb': 0.4, 'rsi': 0.2}
-
-            if stats.regime_metrics:
-                regime = stats.regime_metrics.regime_type
-                if regime == 'Mean Reverting':
-                    weights = {'mr': 0.5, 'bb': 0.3, 'rsi': 0.2}
-                elif regime == 'Trending':
-                    weights = {'mr': 0.3, 'bb': 0.5, 'rsi': 0.2}
-                elif regime == 'High Volatility':
-                    weights = {'mr': 0.4, 'bb': 0.4, 'rsi': 0.2}
-
-            combined_signal = (
-                weights['mr'] * mr_signal +
-                weights['bb'] * bb_signal +
-                weights['rsi'] * rsi_signal
-            )
-
-            if abs(combined_signal) < 0.5:
-                return 0.0
-            return np.sign(combined_signal)
-
-        except Exception as e:
-            logger.error(f"Error generating enhanced signals: {str(e)}")
-            return 0.0
+        logger.info(f"Found {len(valid_pairs)} valid pairs")
+        return valid_pairs
 
     def _calculate_returns(self, signals: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
-        """Calculate strategy returns with enhanced metrics"""
+        """
+        Calculate strategy returns and performance metrics.
+
+        Processes trading signals and price data to compute:
+        - Individual pair returns
+        - Portfolio returns
+        - Transaction costs
+        - Performance metrics (Sharpe ratio, drawdown)
+
+        Args:
+            signals: DataFrame with trading signals
+            prices: DataFrame with price data
+
+        Returns:
+            DataFrame containing returns and performance metrics
+
+        Note:
+            Handles position adjustments based on pair statistics
+            and includes transaction cost calculations
+        """
         returns = pd.DataFrame(index=signals.index)
         returns['portfolio_return'] = 0.0
 
         for pair in self.pairs:
             try:
                 asset1, asset2 = pair
+                asset1_prices = prices[prices['Symbol'] == asset1].set_index('Date')['Adj_Close']
+                asset2_prices = prices[prices['Symbol'] == asset2].set_index('Date')['Adj_Close']
 
-                # Get returns for each asset
-                asset1_data = prices[prices['Symbol'] == asset1].sort_values('Date')
-                asset2_data = prices[prices['Symbol'] == asset2].sort_values('Date')
+                rets1 = asset1_prices.pct_change()
+                rets2 = asset2_prices.pct_change()
 
-                rets1 = asset1_data['Adj_Close'].pct_change()
-                rets2 = asset2_data['Adj_Close'].pct_change()
-
-                stats = self.positions.get(pair)
-                if not stats:
+                common_dates = signals.index.intersection(rets1.index).intersection(rets2.index)
+                if len(common_dates) == 0:
                     continue
 
-                pair_signals = signals[pair].shift(1)
-                pair_returns = pair_signals * (rets1 - stats.hedge_ratio * rets2)
+                signals_aligned = signals.loc[common_dates, pair]
+                rets1_aligned = rets1.loc[common_dates]
+                rets2_aligned = rets2.loc[common_dates]
 
-                if stats.position_sizes:
-                    adj_returns = (
-                            stats.position_sizes['asset1'] * rets1 +
-                            stats.position_sizes['asset2'] * rets2
+                pair_signals = signals_aligned.shift(1).fillna(0)
+                stats = self.positions.get(pair)
+
+                if stats is not None and stats.position_sizes:
+                    pair_returns = pair_signals * (
+                            stats.position_sizes['asset1'] * rets1_aligned +
+                            stats.position_sizes['asset2'] * rets2_aligned
                     )
-                    pair_returns = pair_signals * adj_returns
+                else:
+                    hedge_ratio = self.calculator.calculate_hedge_ratio(
+                        asset1_prices[common_dates],
+                        asset2_prices[common_dates]
+                    )
+                    pair_returns = pair_signals * (rets1_aligned - hedge_ratio * rets2_aligned)
 
                 trades = pair_signals.diff().fillna(0) != 0
                 transaction_costs = trades * self.transaction_cost_pct
 
-                net_returns = pair_returns - transaction_costs
-                returns[f'{asset1}_{asset2}_return'] = net_returns
-
-                position_size = self.calculate_position_sizes_v2(pair, stats, prices)
-                returns['portfolio_return'] += net_returns * position_size
+                returns[f'{asset1}_{asset2}_return'] = pair_returns - transaction_costs
+                returns.loc[common_dates, 'portfolio_return'] += pair_returns - transaction_costs
 
             except Exception as e:
                 logger.error(f"Error calculating returns for pair {pair}: {str(e)}")
@@ -645,593 +820,313 @@ class EnhancedStatPairsStrategy(BaseStrategy):
 
         returns['cumulative_return'] = (1 + returns['portfolio_return']).cumprod()
         returns['drawdown'] = self._calculate_drawdown(returns['cumulative_return'])
-
-        window = min(252, len(returns) // 4)
-        returns['rolling_sharpe'] = self._calculate_rolling_sharpe(returns['portfolio_return'], window)
-        returns['rolling_volatility'] = returns['portfolio_return'].rolling(window).std() * np.sqrt(252)
+        returns['rolling_sharpe'] = self._calculate_rolling_sharpe(returns['portfolio_return'], 252)
+        returns['rolling_volatility'] = returns['portfolio_return'].rolling(window=252).std() * np.sqrt(252)
 
         return returns
 
     def _calculate_drawdown(self, cumulative_returns: pd.Series) -> pd.Series:
-        """Calculate drawdown series"""
+        """
+        Calculate drawdown series for portfolio returns.
+
+        Computes running maximum drawdown as percentage decline
+        from previous peak value.
+
+        Args:
+            cumulative_returns: Series of cumulative strategy returns
+
+        Returns:
+            Series containing drawdown values
+        """
         rolling_max = cumulative_returns.expanding().max()
         drawdown = (cumulative_returns - rolling_max) / rolling_max
         return drawdown
 
     def _calculate_rolling_sharpe(self, returns: pd.Series, window: int) -> pd.Series:
-        """Calculate rolling Sharpe ratio"""
+        """
+        Calculate rolling Sharpe ratio over specified window.
+
+        Computes annualized Sharpe ratio using rolling window of returns.
+        Assumes risk-free rate of zero for simplicity.
+
+        Args:
+            returns: Series of strategy returns
+            window: Rolling window size in days
+
+        Returns:
+            Series containing rolling Sharpe ratio values
+
+        Note:
+            Annualizes using sqrt(252) assuming daily returns
+        """
         rolling_mean = returns.rolling(window).mean()
         rolling_std = returns.rolling(window).std()
         rolling_sharpe = np.sqrt(252) * (rolling_mean / rolling_std)
         return rolling_sharpe
 
-    def _generate_param_combinations(self, param_grid: Dict) -> List[Dict]:
-        """Generate all parameter combinations for optimization"""
-        from itertools import product
 
-        keys = list(param_grid.keys())
-        values = list(param_grid.values())
-        combinations = list(product(*values))
+def load_and_preprocess_data(data_dir: str, symbols: List[str]) -> pd.DataFrame:
+    """
+    Load and preprocess price data for analysis.
 
-        return [dict(zip(keys, combo)) for combo in combinations]
+    Loads CSV files for specified symbols and combines into a single
+    DataFrame with required formatting and cleaning.
 
-    def optimize_parameters(self, prices: pd.DataFrame, param_grid: Dict) -> Dict:
-        """Optimize strategy parameters using grid search"""
-        best_sharpe = -np.inf
-        best_params = {}
+    Args:
+        data_dir: Directory containing price data files
+        symbols: List of symbols to load
 
-        for params in self._generate_param_combinations(param_grid):
-            try:
-                for param, value in params.items():
-                    setattr(self, param, value)
+    Returns:
+        DataFrame with preprocessed price data
 
-                signals = self.generate_signals(prices)
-                returns = self._calculate_returns(signals, prices)
+    Raises:
+        ValueError: If required columns are missing
+        Exception: If error occurs during loading
+    """
+    all_data = []
 
-                sharpe = self._calculate_sharpe_ratio(returns['portfolio_return'])
+    for symbol in symbols:
+        try:
+            file_path = os.path.join(data_dir, f"{symbol}.csv")
+            df = pd.read_csv(file_path)
+            df['Symbol'] = symbol
+            all_data.append(df)
+        except Exception as e:
+            logger.error(f"Error loading {symbol}: {str(e)}")
+            raise
 
-                if sharpe > best_sharpe:
-                    best_sharpe = sharpe
-                    best_params = params.copy()
+    combined_df = pd.concat(all_data, ignore_index=True)
+    required_columns = ['Date', 'Symbol', 'Adj_Close', 'High', 'Low', 'Open', 'Close', 'Volume']
+    missing_columns = set(required_columns) - set(combined_df.columns)
 
-            except Exception as e:
-                logger.error(f"Error in parameter optimization: {str(e)}")
-                continue
+    if missing_columns:
+        raise ValueError(f"Missing required columns: {missing_columns}")
 
-        return best_params
+    combined_df['Date'] = pd.to_datetime(combined_df['Date'])
+    combined_df = combined_df.sort_values(['Date', 'Symbol']).reset_index(drop=True)
 
-    def _calculate_sharpe_ratio(self, returns: pd.Series) -> float:
-        """Calculate annualized Sharpe ratio"""
-        if len(returns) < 2:
-            return -np.inf
+    logger.info(f"Successfully loaded data for {len(symbols)} symbols")
+    return combined_df
 
-        annualized_return = returns.mean() * 252
-        annualized_vol = returns.std() * np.sqrt(252)
-
-        return annualized_return / annualized_vol if annualized_vol > 0 else -np.inf
-
-    def plot_strategy_analysis(self, prices: pd.DataFrame, output_dir: Optional[Path] = None) -> None:
-        """Plot comprehensive strategy analysis including exit behaviors, regimes, and price data"""
-        if not self.trades:
-            logger.warning("No trades available for analysis")
-            return
-
-        trades_df = pd.DataFrame(self.trades)
-
-        fig = make_subplots(
-            rows=4, cols=2,
-            subplot_titles=(
-                'Price Evolution and Trades',
-                'Returns Distribution',
-                'Exit Types Distribution',
-                'Signal Strength vs. Time',
-                'Regime Changes and Positions',
-                'Rolling Volatility',
-                'Performance by Exit Type',
-                'Regime Transition Matrix'
-            ),
-            vertical_spacing=0.08,
-            horizontal_spacing=0.1,
-            row_heights=[0.3, 0.23, 0.23, 0.23]
-        )
-
-        traded_pairs = set((trade['Pair'].split('/')[0], trade['Pair'].split('/')[1])
-                           for trade in self.trades if 'Pair' in trade)
-
-        for asset1, asset2 in traded_pairs:
-            norm_price1 = prices[asset1] / prices[asset1].iloc[0]
-            norm_price2 = prices[asset2] / prices[asset2].iloc[0]
-
-            fig.add_trace(
-                go.Scatter(
-                    x=prices.index,
-                    y=norm_price1,
-                    name=f'{asset1} Price',
-                    line=dict(width=1)
-                ),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=prices.index,
-                    y=norm_price2,
-                    name=f'{asset2} Price',
-                    line=dict(width=1)
-                ),
-                row=1, col=1
-            )
-
-        entry_trades = trades_df[trades_df['Action'] == 'ENTRY']
-        exit_trades = trades_df[trades_df['Action'] == 'EXIT']
-
-        for trades, color, name in [(entry_trades, 'green', 'Entries'),
-                                    (exit_trades, 'red', 'Exits')]:
-            if not trades.empty and 'Date' in trades.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=trades['Date'],
-                        y=[1] * len(trades),
-                        mode='markers',
-                        marker=dict(color=color, size=8),
-                        name=name,
-                        text=trades['Pair'],
-                        hovertemplate='%{text}<br>Date: %{x}'
-                    ),
-                    row=1, col=1
-                )
-
-        for pair in traded_pairs:
-            asset1, asset2 = pair
-            pair_returns = pd.Series(0.0, index=prices.index)
-            pair_trades = trades_df[trades_df['Pair'] == f"{asset1}/{asset2}"]
-
-            if not pair_trades.empty:
-                returns = prices[asset1].pct_change() - prices[asset2].pct_change()
-                mask = pd.Series(False, index=prices.index)
-
-                for _, trade in pair_trades.iterrows():
-                    if 'Date' in trade:
-                        mask[trade['Date']] = True
-
-                pair_returns[mask] = returns[mask]
-
-                fig.add_trace(
-                    go.Histogram(
-                        x=pair_returns[pair_returns != 0],
-                        name=f"{asset1}/{asset2}",
-                        opacity=0.7,
-                        nbinsx=30
-                    ),
-                    row=1, col=2
-                )
-
-        exit_reasons = trades_df[trades_df['Action'] == 'EXIT']['Reason'].value_counts()
-        fig.add_trace(
-            go.Bar(x=exit_reasons.index, y=exit_reasons.values, name='Exit Types'),
-            row=2, col=1
-        )
-
-        for pair in self.pairs:
-            if pair in self.signal_history:
-                history = self.signal_history[pair]
-                fig.add_trace(
-                    go.Scatter(
-                        x=history['timestamp'],
-                        y=history['signal_strength'],
-                        name=f"{pair[0]}/{pair[1]} Signal",
-                        mode='lines'
-                    ),
-                    row=2, col=2
-                )
-
-        fig.add_hline(
-            y=self.signal_exit_threshold,
-            line_dash="dash",
-            row=2, col=2,
-            name='Exit Threshold'
-        )
-
-        lookback = 21
-        for asset in prices.columns:
-            vol = prices[asset].pct_change().rolling(lookback).std() * np.sqrt(252)
-            fig.add_trace(
-                go.Scatter(
-                    x=prices.index,
-                    y=vol,
-                    name=f'{asset} Volatility',
-                    line=dict(width=1)
-                ),
-                row=3, col=2
-            )
-
-        exit_performance = exit_trades.groupby('Reason')['PnL'].agg(['mean', 'count'])
-        fig.add_trace(
-            go.Bar(
-                x=exit_performance.index,
-                y=exit_performance['mean'],
-                name='Avg PnL by Exit Type'
-            ),
-            row=4, col=1
-        )
-
-        if 'regime_type' in exit_trades.columns:
-            regime_transitions = []
-            for i in range(1, len(exit_trades)):
-                prev_regime = exit_trades.iloc[i - 1]['regime_type']
-                curr_regime = exit_trades.iloc[i]['regime_type']
-                regime_transitions.append((prev_regime, curr_regime))
-
-            if regime_transitions:
-                transition_df = pd.DataFrame(regime_transitions, columns=['from', 'to'])
-                transition_matrix = pd.crosstab(
-                    transition_df['from'],
-                    transition_df['to'],
-                    normalize='index'
-                )
-
-                fig.add_trace(
-                    go.Heatmap(
-                        z=transition_matrix.values,
-                        x=transition_matrix.columns,
-                        y=transition_matrix.index,
-                        colorscale='RdYlBu',
-                        name='Regime Transitions'
-                    ),
-                    row=4, col=2
-                )
-
-        fig.update_layout(
-            height=1600,
-            title_text="Strategy Analysis - Exit Behaviors and Regimes",
-            showlegend=True,
-            legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=1.05
-            )
-        )
-
-        fig.update_xaxes(title_text="Date", row=1, col=1)
-        fig.update_yaxes(title_text="Normalized Price", row=1, col=1)
-        fig.update_xaxes(title_text="Return", row=1, col=2)
-        fig.update_yaxes(title_text="Frequency", row=1, col=2)
-        fig.update_yaxes(title_text="Annual Volatility", row=3, col=2)
-        fig.update_yaxes(title_text="Average PnL", row=4, col=1)
-
-        if output_dir:
-            fig.write_html(output_dir / "strategy_analysis.html")
-        else:
-            fig.show()
-
-    @classmethod
-    def get_default_parameters(cls) -> Dict[str, Any]:
-        """Return default parameters for the enhanced strategy"""
-        return {
-            "lookback_window": 252,
-            "zscore_entry": 2.0,
-            "zscore_exit": 0.5,
-            "min_half_life": 5,
-            "max_half_life": 126,
-            "max_spread_vol": 0.1,
-            "min_correlation": 0.5,
-            "coint_threshold": 0.05,
-            "max_pairs": 10,
-            "position_size": 0.1,
-            "stop_loss": 0.02,
-            "max_drawdown": 0.2,
-            "cointegration_windows": [63, 126, 252],
-            "min_votes": 2,
-            "regime_adaptation": True,
-            "close_on_signal_flip": True,
-            "signal_exit_threshold": 0.3,
-            "confirmation_periods": 2,
-            "close_on_regime_change": True
-        }
-
-    def save_state(self, path: str) -> None:
-        """Save enhanced strategy state and parameters"""
-        state_path = Path(path)
-        state_path.mkdir(parents=True, exist_ok=True)
-
-        state = {
-            'parameters': {
-                'lookback_window': self.lookback_window,
-                'zscore_entry': self.zscore_entry,
-                'zscore_exit': self.zscore_exit,
-                'min_half_life': self.min_half_life,
-                'max_half_life': self.max_half_life,
-                'max_spread_vol': self.max_spread_vol,
-                'min_correlation': self.min_correlation,
-                'coint_threshold': self.coint_threshold,
-                'cointegration_windows': self.cointegration_windows,
-                'min_votes': self.min_votes,
-                'regime_adaptation': self.regime_adaptation
-            },
-            'pairs': self.pairs,
-            'trades': self.trades,
-            'current_regime': self.current_regime.__dict__ if self.current_regime else None
-        }
-
-        with open(state_path / "strategy_state.json", 'w') as f:
-            json.dump(state, f, indent=4, default=str)
-
-        trades_df = pd.DataFrame(self.trades)
-        if not trades_df.empty:
-            trades_df.to_csv(state_path / "trade_history.csv", index=False)
-
-    def load_state(self, path: str) -> None:
-        """Load enhanced strategy state and parameters"""
-        state_path = Path(path)
-
-        with open(state_path / "strategy_state.json", 'r') as f:
-            state = json.load(f)
-
-        for param, value in state['parameters'].items():
-            setattr(self, param, value)
-
-        self.pairs = state['pairs']
-        self.trades = state['trades']
-
-        if state['current_regime']:
-            self.current_regime = RegimeMetrics(**state['current_regime'])
-
-        trade_history_path = state_path / "trade_history.csv"
-        if trade_history_path.exists():
-            self.trades = pd.read_csv(trade_history_path).to_dict('records')
-
-    def find_pairs(self, prices: pd.DataFrame) -> List[Tuple[str, str]]:
-        """Find cointegrated pairs with multiple testing correction"""
-        valid_pairs = []
-        pair_scores = []
-        all_pvalues = []
-        all_pairs = []
-
-        symbols = prices['Symbol'].unique()
-
-        for i in range(len(symbols)):
-            for j in range(i + 1, len(symbols)):
-                asset1, asset2 = symbols[i], symbols[j]
-
-                try:
-                    asset1_prices = prices[prices['Symbol'] == asset1].sort_values('Date')['Adj_Close']
-                    asset2_prices = prices[prices['Symbol'] == asset2].sort_values('Date')['Adj_Close']
-
-                    votes = self.test_cointegration_multiple_periods(
-                        asset1_prices,
-                        asset2_prices
-                    )
-                    min_pvalue = min(v for v in votes.values())
-                    all_pvalues.append(min_pvalue)
-                    all_pairs.append((asset1, asset2))
-
-                except Exception as e:
-                    logger.warning(f"Error analyzing pair {asset1}-{asset2}: {str(e)}")
-                    continue
-
-        reject, adj_pvalues, _, _ = multipletests(all_pvalues, alpha=self.coint_threshold, method='fdr_bh')
-
-        for (asset1, asset2), adj_pval, is_significant in zip(all_pairs, adj_pvalues, reject):
-            if not is_significant:
-                continue
-
-            try:
-                asset1_prices = prices[prices['Symbol'] == asset1].sort_values('Date')['Adj_Close']
-                asset2_prices = prices[prices['Symbol'] == asset2].sort_values('Date')['Adj_Close']
-
-                hedge_ratio = self.calculator.calculate_hedge_ratio(
-                    asset1_prices,
-                    asset2_prices
-                )
-
-                spread = asset1_prices - hedge_ratio * asset2_prices
-
-                asset1_returns = asset1_prices.pct_change()
-                asset2_returns = asset2_prices.pct_change()
-                correlation = asset1_returns.corr(asset2_returns)
-
-                stats = PairStats(
-                    hedge_ratio=hedge_ratio,
-                    half_life=self.calculator.calculate_half_life(spread),
-                    coint_pvalue=adj_pval,
-                    spread_zscore=self.calculator.calculate_spread_zscore(spread),
-                    spread_vol=spread.std(),
-                    correlation=correlation,
-                    last_update=prices['Date'].max(),
-                    lookback_data={'spread': spread}
-                )
-
-                if (stats.correlation >= self.min_correlation and
-                        self.min_half_life <= stats.half_life <= self.max_half_life and
-                        stats.spread_vol <= self.max_spread_vol):
-                    score = self.calculate_composite_score((asset1, asset2), stats, prices)
-                    pair_scores.append((asset1, asset2, score))
-
-            except Exception as e:
-                logger.warning(f"Error calculating statistics for {asset1}-{asset2}: {str(e)}")
-                continue
-
-        if pair_scores:
-            pair_scores.sort(key=lambda x: x[2], reverse=True)
-            valid_pairs = [(p[0], p[1]) for p in pair_scores[:self.max_pairs]]
-
-        logger.info(f"Found {len(valid_pairs)} valid pairs after multiple testing correction")
-        return valid_pairs
 
 def main():
-    """Test the enhanced statistical pairs trading strategy"""
-    logger.info("Starting enhanced pairs trading strategy test")
+    """
+    Test and analyze the enhanced statistical pairs trading strategy.
 
-    output_dir = Path("pairs_trading_strategy_outputs")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    Performs comprehensive testing and analysis including:
+    1. Data validation and preprocessing
+    2. Strategy parameter optimization
+    3. Trading simulation
+    4. Performance analysis
+    5. Risk metrics calculation
+    6. Trade analysis
 
-    models_dir = output_dir / "models"
-    plots_dir = output_dir / "plots"
-    data_dir = output_dir / "data"
-    results_dir = output_dir / "results"
+    Returns:
+        Dict containing test results and analysis
 
-    for directory in [models_dir, plots_dir, data_dir, results_dir]:
-        directory.mkdir(exist_ok=True)
-
+    Raises:
+        ValueError: If data validation fails
+        Exception: If error occurs during testing
+    """
     try:
-        logger.info("Loading test data...")
-        selected_symbols = [
-            'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META',
-            'NVDA', 'AMD', 'INTC', 'TSM', 'AVGO'
-        ]
+        logger.info("Starting enhanced pairs trading strategy test")
 
-        raw_data_dir = Path(DATA_DIR) / "raw"
-        prices = pd.DataFrame()
-
-        for symbol in selected_symbols:
-            try:
-                csv_path = raw_data_dir / f"{symbol}.csv"
-                if not csv_path.exists():
-                    logger.warning(f"Data file not found for {symbol}")
-                    continue
-
-                df = pd.read_csv(csv_path)
-                df['Date'] = pd.to_datetime(df['Date'])
-                df.set_index('Date', inplace=True)
-                prices[symbol] = df['Adj_Close']
-
-            except Exception as e:
-                logger.error(f"Error loading data for {symbol}: {str(e)}")
-                continue
+        symbols = ['AAPL', 'MSFT']
+        data_dir = os.path.join(DATA_DIR.replace(r'\config', ''), "raw")
+        prices = load_and_preprocess_data(data_dir, symbols)
 
         if prices.empty:
             raise ValueError("No valid price data loaded")
 
         prices = prices.ffill().bfill()
-        prices.to_csv(data_dir / "price_data.csv")
-        logger.info(f"Successfully loaded data for {len(prices.columns)} symbols")
+        logger.info(f"Successfully loaded data for {len(symbols)} symbols")
+
+        for symbol in symbols:
+            symbol_data = prices[prices['Symbol'] == symbol]
+            missing_pct = symbol_data['Adj_Close'].isnull().mean() * 100
+            logger.info(f"{symbol} missing data: {missing_pct:.2f}%")
 
         strategy = EnhancedStatPairsStrategy(
             lookback_window=252,
             zscore_entry=2.0,
             zscore_exit=0.5,
-            min_half_life=5,
+            min_half_life=3,
             max_half_life=126,
             max_spread_vol=0.12,
             min_correlation=0.45,
             coint_threshold=0.05,
             max_pairs=5,
             position_size=0.1,
-            stop_loss=0.02,
+            stop_loss=0.10,
             max_drawdown=0.2,
             close_on_signal_flip=True,
-            signal_exit_threshold=0.3,
-            confirmation_periods=2,
+            signal_exit_threshold=0.4,
+            confirmation_periods=3,
             close_on_regime_change=True
         )
 
-        logger.info("Finding cointegrated pairs...")
-        pairs = strategy.find_pairs(prices)
-        logger.info(f"Found {len(pairs)} valid pairs")
+        strategy.pairs = [('AAPL', 'MSFT')]
+        logger.info(f"Using fixed pair: {strategy.pairs}")
+        if not strategy.pairs:
+            strategy.pairs = [('AAPL', 'MSFT')]
+        logger.info(f"Testing with pairs: {strategy.pairs}")
 
         logger.info("Generating trading signals...")
-        signals = strategy.generate_signals(prices)
-        signals.to_csv(results_dir / "trading_signals.csv")
+        try:
+            signals = strategy.generate_signals(prices)
+            signal_analysis = analyze_signals(signals)
+            logger.info("\nSignal Analysis:")
+            logger.info(f"Total signals generated: {signal_analysis['total_signals']}")
+            logger.info(f"Long signals: {signal_analysis['long_signals']}")
+            logger.info(f"Short signals: {signal_analysis['short_signals']}")
+        except Exception as e:
+            logger.error(f"Error in signal generation: {str(e)}")
+            raise
 
-        logger.info("Running backtest...")
+        logger.info("Calculating returns...")
         equity_curve = strategy._calculate_returns(signals, prices)
-        equity_curve.to_csv(results_dir / "equity_curve.csv")
 
-        logger.info("Generating analysis plots...")
-        strategy.plot_pair_analysis(prices, plots_dir)
-        strategy.plot_strategy_analysis(prices, plots_dir)
+        portfolio_returns = equity_curve['portfolio_return']
+        total_return = (1 + portfolio_returns).prod() - 1
+        annual_return = (1 + total_return) ** (252 / len(portfolio_returns)) - 1
+        volatility = portfolio_returns.std() * np.sqrt(252)
+        sharpe = annual_return / volatility if volatility > 0 else 0
 
-        if True:
-            logger.info("Optimizing strategy parameters...")
-            param_grid = {
-                'zscore_entry': [1.5, 2.0, 2.5],
-                'zscore_exit': [0.0, 0.5],
-                'signal_exit_threshold': [0.2, 0.3, 0.4],
-                'confirmation_periods': [2, 3]
-            }
+        cum_returns = (1 + portfolio_returns).cumprod()
+        rolling_max = cum_returns.expanding().max()
+        drawdowns = (cum_returns - rolling_max) / rolling_max
+        max_drawdown = drawdowns.min()
 
-            best_params = strategy.optimize_parameters(prices, param_grid)
+        risk_metrics = {
+            'sortino_ratio': calculate_sortino_ratio(portfolio_returns),
+            'calmar_ratio': -annual_return / max_drawdown if max_drawdown != 0 else np.inf,
+            'avg_drawdown': drawdowns.mean(),
+            'drawdown_std': drawdowns.std(),
+            'skewness': portfolio_returns.skew(),
+            'kurtosis': portfolio_returns.kurtosis()
+        }
 
-            with open(results_dir / "optimization_results.json", 'w') as f:
-                json.dump(best_params, f, indent=4)
+        logger.info("\nStrategy Performance:")
+        logger.info(f"Total Return: {total_return:.2%}")
+        logger.info(f"Annualized Return: {annual_return:.2%}")
+        logger.info(f"Annualized Volatility: {volatility:.2%}")
+        logger.info(f"Sharpe Ratio: {sharpe:.2f}")
+        logger.info(f"Max Drawdown: {max_drawdown:.2%}")
+        logger.info(f"Sortino Ratio: {risk_metrics['sortino_ratio']:.2f}")
+        logger.info(f"Calmar Ratio: {risk_metrics['calmar_ratio']:.2f}")
 
-        strategy.save_state(str(models_dir / "final_state"))
+        print("\nStrategy Performance:")
+        print(f"Total Return: {total_return:.2%}")
+        print(f"Annualized Return: {annual_return:.2%}")
+        print(f"Annualized Volatility: {volatility:.2%}")
+        print(f"Sharpe Ratio: {sharpe:.2f}")
+        print(f"Max Drawdown: {max_drawdown:.2%}")
 
-        with open(results_dir / "analysis_summary.txt", 'w') as f:
-            f.write("Enhanced Statistical Pairs Trading Analysis\n")
-            f.write("=======================================\n\n")
+        if strategy.trades:
+            trades_df = pd.DataFrame(strategy.trades)
 
-            f.write(f"Analysis Period: {prices.index[0].date()} to {prices.index[-1].date()}\n")
-            f.write(f"Number of assets analyzed: {len(prices.columns)}\n")
-            f.write(f"Number of trading pairs found: {len(strategy.pairs)}\n\n")
+            exits = trades_df[trades_df['Action'] == 'EXIT']
+            print("\nExit Analysis:")
+            if not exits.empty:
+                exit_reasons = exits['ExitReason'].value_counts()
 
-            f.write("Trading Pairs:\n")
-            for pair in strategy.pairs:
-                stats = strategy.positions.get(pair)
-                if stats:
-                    f.write(f"\n{pair[0]} - {pair[1]}:\n")
-                    f.write(f"  Hedge Ratio: {stats.hedge_ratio:.4f}\n")
-                    f.write(f"  Half-Life: {stats.half_life:.1f} days\n")
-                    f.write(f"  Correlation: {stats.correlation:.4f}\n")
-                    f.write(f"  Composite Score: {stats.composite_score:.4f}\n")
-                    if stats.regime_metrics:
-                        f.write(f"  Current Regime: {stats.regime_metrics.regime_type}\n")
+                print("\nExit Distribution:")
+                for reason, count in exit_reasons.items():
+                    print(f"{reason}: {count} exits ({count / len(exits):.1%})")
 
-            f.write("\nExit Analysis:\n")
-            exit_types = pd.DataFrame(strategy.trades)
-            if not exit_types.empty and 'Reason' in exit_types.columns:
-                exit_stats = exit_types[exit_types['Action'] == 'EXIT']['Reason'].value_counts()
-                for reason, count in exit_stats.items():
-                    f.write(f"  {reason}: {count} exits\n")
+                pnl_by_reason = exits.groupby('ExitReason')['PnL'].agg(['mean', 'count', 'sum'])
+                print("\nPnL by Exit Reason:")
+                print(pnl_by_reason)
 
-        logger.info(f"Analysis complete. Results saved to {output_dir}")
+        print("\nPairs Analysis:")
+        pairs_metrics = {}
+        for pair in strategy.pairs:
+            stats = strategy.positions.get(pair)
+            if stats:
+                pair_name = f"{pair[0]}/{pair[1]}"
+                pairs_metrics[pair_name] = {
+                    "hedge_ratio": stats.hedge_ratio,
+                    "half_life": stats.half_life,
+                    "correlation": stats.correlation,
+                    "spread_vol": stats.spread_vol,
+                    "avg_position_size": np.mean([abs(v) for v in stats.position_sizes.values()])
+                }
+
+                print(f"\n{pair_name}:")
+                print(f"Hedge Ratio: {stats.hedge_ratio:.4f}")
+                print(f"Half-Life: {stats.half_life:.1f} days")
+                print(f"Correlation: {stats.correlation:.4f}")
+                print(f"Spread Volatility: {stats.spread_vol:.4f}")
+
+        exit_reasons = pd.Series()
+        pnl_by_reason = pd.Series()
 
         return {
             'strategy': strategy,
             'signals': signals,
+            'signal_analysis': signal_analysis,
             'prices': prices,
-            'pairs': pairs,
-            'equity_curve': equity_curve
+            'pairs': strategy.pairs,
+            'pairs_metrics': pairs_metrics,
+            'equity_curve': equity_curve,
+            'performance': {
+                'total_return': total_return,
+                'annual_return': annual_return,
+                'volatility': volatility,
+                'sharpe': sharpe,
+                'max_drawdown': max_drawdown,
+                'risk_metrics': risk_metrics
+            },
+            'trade_analysis': {
+                'total_trades': len(strategy.trades),
+                'exit_distribution': exit_reasons.to_dict() if strategy.trades else {},
+                'pnl_by_reason': pnl_by_reason.to_dict() if strategy.trades else {}
+            }
         }
 
     except Exception as e:
         logger.error(f"Error in main execution: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
         return None
 
 
+def analyze_signals(signals: pd.DataFrame) -> Dict:
+    """
+    Analyze trading signal characteristics.
+
+    Args:
+        signals: DataFrame of trading signals
+
+    Returns:
+        Dict containing signal statistics
+    """
+    signal_counts = {
+        'total_signals': np.array((signals != 0)).sum().sum(),
+        'long_signals': np.array((signals > 0)).sum().sum(),
+        'short_signals': np.array((signals < 0)).sum().sum()
+    }
+    return signal_counts
+
+
+def calculate_sortino_ratio(returns: pd.Series) -> float:
+    """
+    Calculate Sortino ratio using negative returns standard deviation.
+
+    Args:
+        returns: Series of strategy returns
+
+    Returns:
+        float: Sortino ratio value
+    """
+    negative_returns = returns[returns < 0]
+    downside_std = negative_returns.std() * np.sqrt(252)
+    if downside_std == 0:
+        return np.inf
+    return (returns.mean() * 252) / downside_std
 
 
 if __name__ == "__main__":
     results = main()
     if results is not None:
         print("\nEnhanced Statistical Pairs Trading analysis completed successfully!")
-
-        strategy = results['strategy']
-        pairs = results['pairs']
-        equity_curve = results['equity_curve']
-
-        print("\nStrategy Performance:")
-        total_return = (equity_curve['portfolio_return'] + 1).prod() - 1
-        sharpe = np.sqrt(252) * (equity_curve['portfolio_return'].mean() /
-                                equity_curve['portfolio_return'].std())
-
-        print(f"Total Return: {total_return:.2%}")
-        print(f"Sharpe Ratio: {sharpe:.2f}")
-        print(f"Max Drawdown: {equity_curve['drawdown'].min():.2%}")
-
-        print("\nPairs Analysis:")
-        for pair in pairs:
-            stats = strategy.positions.get(pair)
-            if stats:
-                print(f"\n{pair[0]} - {pair[1]}:")
-                print(f"Hedge Ratio: {stats.hedge_ratio:.4f}")
-                print(f"Half-Life: {stats.half_life:.1f} days")
-                print(f"Correlation: {stats.correlation:.4f}")
-                print(f"Composite Score: {stats.composite_score:.4f}")
-                if stats.regime_metrics:
-                    print(f"Current Regime: {stats.regime_metrics.regime_type}")
     else:
         print("\nAnalysis failed. Check logs for details.")
-

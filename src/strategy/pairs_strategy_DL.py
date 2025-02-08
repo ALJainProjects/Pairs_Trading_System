@@ -627,26 +627,71 @@ class PairsTradingDL(BaseStrategy):
         Returns:
             DataFrame with signals (-1, 0, 1) for each pair
         """
+        # signals = pd.DataFrame(index=prices.index)
+        #
+        # if not self.pairs:
+        #     self.find_trading_pairs(prices)
+        #
+        # for pair in self.pairs:
+        #     try:
+        #         asset1, asset2 = pair
+        #         if asset1 not in prices.columns or asset2 not in prices.columns:
+        #             continue
+        #
+        #         pair_data = self.prepare_pair_data(
+        #             prices[asset1],
+        #             prices[asset2]
+        #         )
+        #
+        #         predictions = self.predict_signals(pair_data)
+        #         pair_signals = pd.Series(0, index=prices.index)
+        #
+        #         signal_mask = predictions['signal_probability'] > self.min_confidence
+        #         pair_signals[signal_mask] = predictions.loc[signal_mask, 'predicted_signal']
+        #
+        #         if not pair_signals.empty and pair_signals.iloc[-1] != 0:
+        #             confidence = predictions.loc[signal_mask, 'signal_probability'].iloc[-1]
+        #             position_size = self.calculate_position_size(
+        #                 pair,
+        #                 prices,
+        #                 confidence
+        #             )
+        #             pair_signals *= position_size
+        #
+        #         signals[pair] = pair_signals
+        #
+        #     except Exception as e:
+        #         logger.error(f"Error generating signals for {pair}: {str(e)}")
+        #         continue
+        #
+        # return signals
+        logger.info("Starting DL signal generation")
+
         signals = pd.DataFrame(index=prices.index)
 
         if not self.pairs:
-            self.find_trading_pairs(prices)
+            logger.info("Finding trading pairs...")
+            self.pairs = self.find_trading_pairs(prices)
+            logger.info(f"Found {len(self.pairs)} pairs")
 
         for pair in self.pairs:
             try:
                 asset1, asset2 = pair
+                logger.debug(f"Processing {asset1}/{asset2}")
                 if asset1 not in prices.columns or asset2 not in prices.columns:
                     continue
 
                 pair_data = self.prepare_pair_data(
-                    prices[asset1],
-                    prices[asset2]
+                    stock1_prices=prices[asset1],
+                    stock2_prices=prices[asset2]
                 )
+                logger.debug(f"Prepared data for {asset1}/{asset2}")
 
                 predictions = self.predict_signals(pair_data)
-                pair_signals = pd.Series(0, index=prices.index)
+                logger.debug("Generated predictions")
 
                 signal_mask = predictions['signal_probability'] > self.min_confidence
+                pair_signals = pd.Series(0, index=prices.index)
                 pair_signals[signal_mask] = predictions.loc[signal_mask, 'predicted_signal']
 
                 if not pair_signals.empty and pair_signals.iloc[-1] != 0:
@@ -657,6 +702,7 @@ class PairsTradingDL(BaseStrategy):
                         confidence
                     )
                     pair_signals *= position_size
+                    logger.info(f"Generated signal for {asset1}/{asset2}: {pair_signals.iloc[-1]:.4f}")
 
                 signals[pair] = pair_signals
 
@@ -664,6 +710,7 @@ class PairsTradingDL(BaseStrategy):
                 logger.error(f"Error generating signals for {pair}: {str(e)}")
                 continue
 
+        logger.info("Signal generation completed")
         return signals
 
     def update_positions(self,

@@ -10,6 +10,7 @@ import optuna
 from config.logging_config import logger
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from src.strategy.backtest import MultiPairBackTester
 
 
 class BaseStrategyEvaluator:
@@ -76,7 +77,7 @@ class MultiStrategyOptimizer:
     def __init__(
             self,
             strategy: Any,
-            returns: pd.DataFrame,
+            prices: pd.DataFrame,  # Changed from returns to prices
             strategy_type: str,
             objective_weights: Optional[Dict[str, float]] = None,
             initial_capital: float = 100000,
@@ -100,8 +101,15 @@ class MultiStrategyOptimizer:
             correlation_threshold: Threshold for correlation filtering
             min_model_confidence: Minimum required model confidence
         """
+        if 'Symbol' not in prices.columns:
+            raise ValueError("Input data must contain 'Symbol' column")
+
         self.strategy = strategy
-        self.returns = returns
+        self.prices = prices.copy()
+
+        self.returns = prices.copy()
+        self.returns['Return'] = self.returns.groupby('Symbol')['Adj_Close'].pct_change()
+
         self.strategy_type = strategy_type
         self.objective_weights = objective_weights or {
             'sharpe_ratio': 1.0,
@@ -193,13 +201,14 @@ class MultiStrategyOptimizer:
 
     def _create_backtester(self) -> Any:
         """Create backtester with strategy-specific configurations."""
-        from src.strategy.backtest import MultiPairBackTester
         return MultiPairBackTester(
             strategy=self.strategy,
-            returns=self.returns,
+            prices=self.prices,
             initial_capital=self.initial_capital,
             transaction_cost=self.transaction_cost,
-            max_pairs=self.max_pairs
+            max_pairs=self.max_pairs,
+            cointegration_threshold=self.cointegration_threshold,
+            min_liquidity_threshold=100000
         )
 
     def _calculate_sharpe_ratio(self, returns: pd.Series) -> float:

@@ -110,68 +110,109 @@ class PairRiskManager:
                             positions: Dict,
                             model_confidence: Optional[float] = None) -> RiskMetrics:
         """Update comprehensive risk metrics for a pair"""
-        asset1, asset2 = pair
-        if asset1 not in prices['Symbol'].unique() or asset2 not in prices['Symbol'].unique():
-            raise ValueError(f"Missing price data for pair {asset1}/{asset2}")
+        try:
+            prices = prices.copy()
+            prices['Date'] = pd.to_datetime(prices['Date'])
 
-        # Get the price series for each asset
-        asset1_data = prices[prices['Symbol'] == asset1].sort_values('Date')
-        asset2_data = prices[prices['Symbol'] == asset2].sort_values('Date')
+            price_matrix = prices.pivot(
+                index='Date',
+                columns='Symbol',
+                values='Adj_Close'
+            ).sort_index()
 
-        pair_prices = pd.DataFrame({
-            asset1: asset1_data['Adj_Close'].values,
-            asset2: asset2_data['Adj_Close'].values
-        }, index=asset1_data['Date'])
+            price_matrix = price_matrix.reset_index()
 
-        returns = self._calculate_pair_returns(pair, pair_prices)
-        var, cvar = self.calculate_var_cvar(returns)
+            print(prices.head(10))
+            print(price_matrix.head(10))
+            price_series = price_matrix.set_index('Date')
+            self.correlation_matrix = price_series.pct_change().dropna()
 
-        self.correlation_matrix = prices.pct_change().dropna()
+            returns = self._calculate_pair_returns(pair, price_series)
+            var, cvar = self.calculate_var_cvar(returns)
 
-        metrics = RiskMetrics(
-            var_95=var,
-            cvar_95=cvar,
-            volatility=returns.std() if len(returns) > 1 else 0.0,
-            correlation_risk=self._calculate_correlation_risk(pair, positions),
-            model_confidence=model_confidence or 1.0,
-            cointegration_stability=self._calculate_cointegration_stability(pair, prices)
-        )
+            metrics = RiskMetrics(
+                var_95=var,
+                cvar_95=cvar,
+                volatility=returns.std() if len(returns) > 1 else 0.0,
+                correlation_risk=self._calculate_correlation_risk(pair, positions),
+                model_confidence=model_confidence or 1.0,
+                cointegration_stability=self._calculate_cointegration_stability(pair, prices)
+            )
 
-        self.risk_metrics[pair] = metrics
-        return metrics
-        
+            self.risk_metrics[pair] = metrics
+            return metrics
+
+        except Exception as e:
+            logger.error(f"Error in update_risk_metrics: {str(e)}")
+            raise
+
     def calculate_position_size(self,
-                              portfolio_value: float,
-                              pair: Tuple[str, str],
-                              prices: pd.DataFrame,
-                              model_confidence: Optional[float] = None,
-                              correlation_matrix: Optional[pd.DataFrame] = None) -> float:
+                                portfolio_value: float,
+                                pair: Tuple[str, str],
+                                prices: pd.DataFrame,
+                                model_confidence: Optional[float] = None,
+                                correlation_matrix: Optional[pd.DataFrame] = None) -> float:
         """Calculate position size with enhanced risk adjustments"""
-        base_size = self.max_position_size * portfolio_value
+        try:
+            base_size = self.max_position_size * portfolio_value
 
-        if model_confidence is not None:
-            if model_confidence < self.min_model_confidence:
+            if model_confidence is not None:
+                if model_confidence < self.min_model_confidence:
+                    return 0.0
+                base_size *= model_confidence
+
+            pair_returns = self._calculate_pair_returns(pair, prices)
+            if pair_returns.empty:
+                logger.warning(f"Unable to calculate returns for pair {pair}, setting position size to 0")
                 return 0.0
-            base_size *= model_confidence
 
-        pair_returns = self._calculate_pair_returns(pair, prices)
-        vol_adjustment = self._calculate_volatility_adjustment(pair_returns)
-        base_size *= vol_adjustment
+            vol_adjustment = self._calculate_volatility_adjustment(pair_returns)
+            base_size *= vol_adjustment
 
-        if correlation_matrix is not None:
-            corr_adjustment = self._calculate_correlation_adjustment(pair, correlation_matrix)
-            base_size *= corr_adjustment
+            if correlation_matrix is not None:
+                corr_adjustment = self._calculate_correlation_adjustment(pair, correlation_matrix)
+                base_size *= corr_adjustment
 
-        var, _ = self.calculate_var_cvar(pair_returns)
-        var_adjustment = 1.0 / (1.0 + var)
-        base_size *= var_adjustment
-        
-        return min(base_size, self.max_position_size * portfolio_value)
-        
+            var, _ = self.calculate_var_cvar(pair_returns)
+            var_adjustment = 1.0 / (1.0 + var)
+            base_size *= var_adjustment
+
+            return min(base_size, self.max_position_size * portfolio_value)
+
+        except Exception as e:
+            logger.error(f"Error calculating position size for pair {pair}: {str(e)}")
+            return 0.0
+
     def _calculate_pair_returns(self, pair: Tuple[str, str], prices: pd.DataFrame) -> pd.Series:
-        """Calculate returns for a pair"""
+        """Calculate returns for a pair with forward and backward filling of missing data"""
         asset1, asset2 = pair
-        spread = prices[asset1] - prices[asset2]
+
+        if 'Symbol' in prices.columns:
+
+            price_matrix = prices.pivot(
+                index='Date',
+                columns='Symbol',
+                values='Adj_Close'
+            ).sort_index()
+
+            price_matrix = price_matrix.ffill().bfill()
+
+            if asset1 not in price_matrix.columns or asset2 not in price_matrix.columns:
+                logger.warning(f"Missing asset data for {asset1} or {asset2}")
+                return pd.Series(dtype=float)
+
+            price1 = price_matrix[asset1]
+            price2 = price_matrix[asset2]
+        else:
+            if asset1 not in prices.columns or asset2 not in prices.columns:
+                logger.warning(f"Missing asset data for {asset1} or {asset2}")
+                return pd.Series(dtype=float)
+
+            prices = prices.ffill().bfill()
+            price1 = prices[asset1]
+            price2 = prices[asset2]
+
+        spread = price1 - price2
         return spread.pct_change().dropna()
         
     def _calculate_volatility_adjustment(self, returns: pd.Series) -> float:

@@ -11,6 +11,9 @@ from config.logging_config import logger
 import os
 import json
 
+from src.strategy.pairs_strategy_integrated import IntegratedPairsStrategy
+
+
 class MultiPairBackTester:
     """Enhanced backtester with advanced analytics and risk management"""
     def __init__(
@@ -82,6 +85,61 @@ class MultiPairBackTester:
         """Execute enhanced backtest with non-pivoted data"""
         logger.info("Starting backtest with enhanced monitoring")
 
+        if isinstance(self.strategy, IntegratedPairsStrategy):
+            if not self.strategy.pairs or len(self.strategy.pairs) != 1:
+                raise ValueError("Strategy must have exactly one pair configured")
+
+            asset1, asset2 = self.strategy.pairs[0]
+
+            asset1_data = self.prices[self.prices['Symbol'] == asset1].copy()
+            asset2_data = self.prices[self.prices['Symbol'] == asset2].copy()
+
+            asset1_data.set_index('Date', inplace=True)
+            asset2_data.set_index('Date', inplace=True)
+
+            asset1_data.sort_index(inplace=True)
+            asset2_data.sort_index(inplace=True)
+
+            try:
+                strategy_results = self.strategy.run_strategy(asset1_data, asset2_data)
+
+                self.equity_curve = pd.Series(dtype=float)
+                portfolio_value = self.initial_capital
+
+                for date, row in strategy_results.iterrows():
+                    if date == strategy_results.index[0]:
+                        self.equity_curve[date] = portfolio_value
+                        continue
+
+                    portfolio_value *= (1 + row['returns'])
+                    self.equity_curve[date] = portfolio_value
+
+                    if row['signal'] != 0:
+                        self.trade_history = pd.concat([
+                            self.trade_history,
+                            pd.DataFrame([{
+                                'Date': date,
+                                'Pair': f"{asset1}/{asset2}",
+                                'Action': 'ENTRY' if row['signal'] != 0 else 'EXIT',
+                                'Quantity': row['position_size1'],
+                                'Price1': asset1_data.loc[date, 'Adj_Close'],
+                                'Price2': asset2_data.loc[date, 'Adj_Close'],
+                                'PnL': row['returns'] * portfolio_value if 'returns' in row else 0
+                            }])
+                        ], ignore_index=True)
+
+                self.strategy_results = strategy_results
+                self.asset1_data = asset1_data
+                self.asset2_data = asset2_data
+
+                return self.equity_curve
+
+            except Exception as e:
+                logger.error(f"Error in backtest: {str(e)}")
+                error_trace = traceback.format_exc()
+                logger.error(f"Full traceback:\n{error_trace}")
+                raise
+
         unique_dates = self.prices['Date'].unique()
         self.equity_curve = pd.Series(index=unique_dates, dtype=float)
         portfolio_value = self.initial_capital
@@ -104,6 +162,8 @@ class MultiPairBackTester:
                     if hasattr(self.strategy, 'predict_signals')
                     else self.strategy.generate_signals(historical_data)
                 )
+
+                print(signals)
 
                 portfolio_value = self._process_signals_and_update(
                     signals,

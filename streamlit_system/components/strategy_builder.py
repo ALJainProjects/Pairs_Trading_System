@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple
 
 from config.logging_config import logger
 from src.strategy.backtest import MultiPairBackTester
+from src.strategy.pairs_strategy_integrated import IntegratedPairsStrategy, create_strategy_dashboard
 from src.strategy.risk import PairRiskManager
 from src.strategy.pairs_strategy_SL import EnhancedStatPairsStrategy
 from src.strategy.pairs_strategy_ML import MLPairsStrategy
@@ -62,14 +63,154 @@ class EnhancedStrategyBuilder:
         """Render strategy selection and configuration interface."""
         st.subheader("Strategy Configuration")
 
+        st.subheader("Strategy Configuration")
+
         strategy_type = st.selectbox(
             "Strategy Type",
-            ["Statistical", "Machine Learning", "Deep Learning"]
+            ["Integrated", "Statistical", "Machine Learning", "Deep Learning"]
         )
 
         params = {}
 
-        if strategy_type == "Statistical":
+        if strategy_type == "Integrated":
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.markdown("### Core Parameters")
+                params.update({
+                    'lookback_window': st.number_input(
+                        "Lookback Window (days)",
+                        min_value=10,
+                        max_value=252,
+                        value=126
+                    ),
+                    'zscore_entry': st.number_input(
+                        "Z-Score Entry",
+                        min_value=0.0,
+                        max_value=5.0,
+                        value=2.25,
+                        step=0.05
+                    ),
+                    'zscore_exit': st.number_input(
+                        "Z-Score Exit",
+                        min_value=0.0,
+                        max_value=5.0,
+                        value=0.5,
+                        step=0.05
+                    ),
+                    'instant_entry_threshold': st.number_input(
+                        "Instant Entry Z-Score",
+                        min_value=0.0,
+                        max_value=5.0,
+                        value=2.75,
+                        step=0.05
+                    )
+                })
+
+            with col2:
+                st.markdown("### Risk Parameters")
+                params.update({
+                    'stop_loss': st.number_input(
+                        "Stop Loss (%)",
+                        min_value=1.0,
+                        max_value=20.0,
+                        value=4.0,
+                        step=0.5
+                    ) / 100,
+                    'trailing_stop': st.number_input(
+                        "Trailing Stop (%)",
+                        min_value=1.0,
+                        max_value=20.0,
+                        value=2.0,
+                        step=0.5
+                    ) / 100,
+                    'profit_take': st.number_input(
+                        "Profit Take (%)",
+                        min_value=1.0,
+                        max_value=30.0,
+                        value=10.0,
+                        step=0.5
+                    ) / 100,
+                    'time_stop': st.number_input(
+                        "Time Stop (days)",
+                        min_value=1,
+                        max_value=100,
+                        value=25
+                    )
+                })
+
+            with col3:
+                st.markdown("### Position Parameters")
+                params.update({
+                    'position_size': st.number_input(
+                        "Position Size (%)",
+                        min_value=1.0,
+                        max_value=50.0,
+                        value=10.0,
+                        step=1.0
+                    ) / 100,
+                    'min_correlation': st.number_input(
+                        "Min Correlation",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.5,
+                        step=0.05
+                    ),
+                    'momentum_filter': st.number_input(
+                        "Momentum Filter Period",
+                        min_value=5,
+                        max_value=100,
+                        value=20
+                    )
+                })
+
+            st.markdown("### Advanced Parameters")
+            col4, col5 = st.columns(2)
+
+            with col4:
+                params.update({
+                    'regime_lookback': st.number_input(
+                        "Regime Detection Window",
+                        min_value=21,
+                        max_value=252,
+                        value=126
+                    ),
+                    'confirmation_periods': st.number_input(
+                        "Signal Confirmation Periods",
+                        min_value=1,
+                        max_value=10,
+                        value=1
+                    ),
+                    'partial_take_profits': st.multiselect(
+                        "Partial Take Profit Levels",
+                        options=[
+                            (0.05, 0.3),
+                            (0.08, 0.5),
+                            (0.12, 0.7)
+                        ],
+                        default=[(0.05, 0.3), (0.08, 0.5)]
+                    )
+                })
+
+            with col5:
+                params.update({
+                    'signal_exit_threshold': st.number_input(
+                        "Signal Exit Threshold",
+                        min_value=0.1,
+                        max_value=1.0,
+                        value=0.5,
+                        step=0.1
+                    ),
+                    'max_portfolio_vol': st.number_input(
+                        "Max Portfolio Volatility",
+                        min_value=0.05,
+                        max_value=0.5,
+                        value=0.15,
+                        step=0.01
+                    )
+                })
+
+        elif strategy_type == "Statistical":
             col1, col2, col3 = st.columns(3)
 
             with col1:
@@ -450,6 +591,17 @@ class EnhancedStrategyBuilder:
 
                 equity_curve = backtester.run_backtest()
 
+                if isinstance(strategy, IntegratedPairsStrategy):
+                    st.subheader("Strategy Performance Dashboard")
+
+                    fig = create_strategy_dashboard(
+                        backtester.strategy_results,
+                        backtester.asset1_data,
+                        backtester.asset2_data,
+                        strategy.trades
+                    )
+                    st.plotly_chart(fig)
+
                 st.session_state['backtest_results'] = {
                     'equity_curve': equity_curve,
                     'metrics': backtester._calculate_performance_metrics(),
@@ -462,7 +614,7 @@ class EnhancedStrategyBuilder:
                     }
                 }
 
-                st.success("Backtest completed successfully!")
+            st.success("Backtest completed successfully!")
 
         except Exception as e:
             st.error(f"Error running backtest: {str(e)}")
@@ -561,7 +713,29 @@ class EnhancedStrategyBuilder:
             train_data, test_data = self._get_train_test_data()
             pairs = self._get_selected_pairs()
 
-            if strategy_type == "Statistical":
+            if strategy_type == "Integrated":
+                strategy = IntegratedPairsStrategy(
+                    lookback_window=params['lookback_window'],
+                    zscore_entry=params['zscore_entry'],
+                    zscore_exit=params['zscore_exit'],
+                    stop_loss=params['stop_loss'],
+                    trailing_stop=params['trailing_stop'],
+                    time_stop=params['time_stop'],
+                    profit_take=params['profit_take'],
+                    position_size=params['position_size'],
+                    min_correlation=params['min_correlation'],
+                    signal_exit_threshold=params['signal_exit_threshold'],
+                    confirmation_periods=params['confirmation_periods'],
+                    max_portfolio_vol=params['max_portfolio_vol'],
+                    regime_lookback=params['regime_lookback'],
+                    instant_confirm_threshold=params['instant_entry_threshold'],
+                    momentum_filter_period=params['momentum_filter'],
+                    partial_take_profit_levels=params['partial_take_profits']
+                )
+                strategy.pairs = pairs
+                return strategy
+
+            elif strategy_type == "Statistical":
                 strategy = EnhancedStatPairsStrategy(
                     lookback_window=params['lookback_window'],
                     zscore_entry=params['zscore_entry'],

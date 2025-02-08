@@ -37,6 +37,41 @@ class StatisticalModel:
 
     def __init__(self):
         logger.info("Initializing StatisticalModel.")
+        self.market_features = {}
+
+    def update_features(self, data: pd.DataFrame):
+        self.market_features = self.calculate_microstructure_features(data)
+
+    def calculate_microstructure_features(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate intraday volatility and liquidity features from OHLCV data.
+
+        Args:
+            data: DataFrame with OHLCV data
+        Returns:
+            DataFrame with additional features
+        """
+        features = pd.DataFrame(index=data.index)
+
+        features['parkinson_vol'] = np.sqrt(
+            (1.0 / (4.0 * np.log(2.0))) *
+            (np.log(data['High'] / data['Low']) ** 2)
+        )
+
+        features['relative_volume'] = (
+                data['Volume'] / data['Volume'].rolling(20).mean()
+        )
+
+        features['amihud_ratio'] = (
+                                           np.abs(data['Adj_Close'].pct_change()) /
+                                           (data['Volume'] * data['Adj_Close'])
+                                   ) * 1e6
+
+        features['trading_range'] = (
+                (data['High'] - data['Low']) / data['Open']
+        )
+
+        return features
 
     def cointegration_test(self, asset1: pd.Series, asset2: pd.Series, significance: float = 0.05) -> bool:
         """
@@ -169,8 +204,8 @@ class StatisticalModel:
         lower_band = roll_mean - (num_std_dev * roll_std)
 
         signals = pd.Series(index=spread.index, data=0, dtype=float)
-        signals[spread < lower_band] = 1.0  # Long signal
-        signals[spread > upper_band] = -1.0  # Short signal
+        signals[spread < lower_band] = 1.0
+        signals[spread > upper_band] = -1.0
         return signals
 
     def rsi_signal(self, spread: pd.Series, window: int = 14,
@@ -196,8 +231,8 @@ class StatisticalModel:
         rsi = 100 - (100 / (1 + rs))
 
         signals = pd.Series(index=spread.index, data=0, dtype=float)
-        signals[rsi < lower_threshold] = 1.0  # Long signal
-        signals[rsi > upper_threshold] = -1.0  # Short signal
+        signals[rsi < lower_threshold] = 1.0
+        signals[rsi > upper_threshold] = -1.0
         return signals
 
     def combine_signals(self, signal_series_list: list, weights: list = None) -> pd.Series:
@@ -222,7 +257,6 @@ class StatisticalModel:
         for signal, weight in zip(signal_series_list, weights):
             combined += signal * weight
 
-        # Threshold the combined signal
         final_signals = pd.Series(index=combined.index, data=0, dtype=float)
         final_signals[combined > 0.5] = 1.0
         final_signals[combined < -0.5] = -1.0
@@ -247,7 +281,6 @@ class StatisticalModel:
             rolling_mean = spread.rolling(window=window).mean()
             rolling_std = spread.rolling(window=window).std()
 
-            # Add small constant to avoid division by zero
             zscore = (spread - rolling_mean) / (rolling_std + 1e-8)
             zscore = zscore.replace([np.inf, -np.inf], 0)
 
@@ -260,12 +293,12 @@ class StatisticalModel:
     def calculate_hedge_ratio(self, asset1: pd.Series, asset2: pd.Series,
                               window: int = 63) -> float:
         """
-        Calculate hedge ratio using rolling linear regression.
+        Calculate hedge ratio using linear regression with aligned indices
 
         Args:
-            asset1 (pd.Series): Price series of first asset
-            asset2 (pd.Series): Price series of second asset
-            window (int): Rolling window size
+            asset1: Price series of first asset
+            asset2: Price series of second asset
+            window: Rolling window size
 
         Returns:
             float: Calculated hedge ratio
@@ -274,15 +307,25 @@ class StatisticalModel:
             return 1.0
 
         try:
-            # Use last window of data
-            y = asset1[-window:]
-            X = add_constant(asset2[-window:])
+            if not isinstance(asset1.index, pd.DatetimeIndex):
+                asset1 = pd.Series(asset1.values, index=pd.date_range(end=pd.Timestamp.now(),
+                                                                      periods=len(asset1), freq='D'))
+            if not isinstance(asset2.index, pd.DatetimeIndex):
+                asset2 = pd.Series(asset2.values, index=pd.date_range(end=pd.Timestamp.now(),
+                                                                      periods=len(asset2), freq='D'))
 
-            # Run OLS regression
+            df = pd.DataFrame({'asset1': asset1, 'asset2': asset2})
+            df = df.dropna()
+
+            if len(df) < window:
+                return 1.0
+
+            y = df['asset1'].iloc[-window:]
+            X = add_constant(df['asset2'].iloc[-window:])
+
             model = OLS(y, X).fit()
-            hedge_ratio = model.params[1]  # Beta coefficient
+            hedge_ratio = model.params[1]
 
-            # Validate hedge ratio
             if not np.isfinite(hedge_ratio) or abs(hedge_ratio) > 10:
                 logger.warning(f"Invalid hedge ratio {hedge_ratio}, using 1.0")
                 return 1.0
@@ -306,18 +349,15 @@ class StatisticalModel:
         try:
             lag_spread = spread.shift(1)
             delta_spread = spread - lag_spread
-            lag_spread = lag_spread[1:]  # Remove first NaN
-            delta_spread = delta_spread[1:]  # Remove first NaN
+            lag_spread = lag_spread[1:]
+            delta_spread = delta_spread[1:]
 
-            # Run OLS regression on spread differences
             X = add_constant(lag_spread)
             model = OLS(delta_spread, X).fit()
-            gamma = model.params[1]  # Speed of mean reversion
+            gamma = model.params[1]
 
-            # Calculate half-life
             half_life = -np.log(2) / gamma if gamma < 0 else np.inf
 
-            # Validate half-life
             if not np.isfinite(half_life) or half_life < 0:
                 logger.warning(f"Invalid half-life {half_life}, using inf")
                 return np.inf
@@ -345,11 +385,9 @@ class StatisticalModel:
             if len(asset1) < window or len(asset2) < window:
                 return 0.0, 1.0
 
-            # Get last window of data
             y = asset1[-window:]
             x = asset2[-window:]
 
-            # Run augmented Dickey-Fuller test on spread
             hedge_ratio = self.calculate_hedge_ratio(y, x)
             spread = y - hedge_ratio * x
 
@@ -361,6 +399,69 @@ class StatisticalModel:
             logger.error(f"Error in cointegration test: {str(e)}")
             return 0.0, 1.0
 
+    def generate_enhanced_signals(self, spread: pd.Series,
+                                  asset1: pd.DataFrame,
+                                  asset2: pd.DataFrame) -> float:
+        """
+        Generate trading signals incorporating OHLCV-based features.
+        """
+        zscore = self.calculate_spread_zscore(spread)
+
+        vol_ratio = (
+                            asset1['Volume'] / asset1['Volume'].rolling(20).mean()
+                    ) / (
+                            asset2['Volume'] / asset2['Volume'].rolling(20).mean()
+                    )
+
+        range_ratio = (
+                              (asset1['High'] - asset1['Low']) / asset1['Open']
+                      ) / (
+                              (asset2['High'] - asset2['Low']) / asset2['Open']
+                      )
+
+        signal = zscore * np.sign(1 - range_ratio)
+
+        signal *= np.minimum(1, vol_ratio)
+
+        return signal
+
+
+def analyze_strategy_performance(positions):
+    """
+    Calculate key performance metrics for the pairs trading strategy.
+
+    Args:
+        positions: DataFrame containing strategy positions and returns
+
+    Returns:
+        dict containing performance metrics
+    """
+    returns = positions['strategy_returns']
+
+    total_return = positions['cumulative_returns'].iloc[-1]
+    annual_return = (1 + total_return) ** (252 / len(returns)) - 1
+
+    daily_vol = returns.std()
+    annual_vol = daily_vol * np.sqrt(252)
+    sharpe_ratio = np.sqrt(252) * returns.mean() / daily_vol
+
+    cumulative = (1 + returns).cumprod()
+    running_max = cumulative.cummax()
+    drawdowns = cumulative / running_max - 1
+    max_drawdown = drawdowns.min()
+
+    avg_exposure = positions['total_exposure'].mean()
+    max_exposure = positions['total_exposure'].max()
+
+    return {
+        'total_return': total_return,
+        'annual_return': annual_return,
+        'annual_volatility': annual_vol,
+        'sharpe_ratio': sharpe_ratio,
+        'max_drawdown': max_drawdown,
+        'avg_exposure': avg_exposure,
+        'max_exposure': max_exposure
+    }
 
 def main():
     """Test the StatisticalModel with AAPL and MSFT data."""
@@ -405,13 +506,11 @@ def main():
     )
 
     print("\nGenerating trading signals using multiple methods...")
-    # Generate signals using different methods
     signals_ols = model.mean_reversion_signal(ols_spread)
     signals_ma = model.moving_average_crossover_signal(ols_spread)
     signals_bb = model.bollinger_band_signal(ols_spread)
     signals_rsi = model.rsi_signal(ols_spread)
 
-    # Combine signals with equal weights
     combined_signals = model.combine_signals([
         signals_ols,
         signals_ma,
@@ -433,24 +532,55 @@ def main():
 
     results.to_csv(os.path.join(output_dir, 'pair_trading_results.csv'))
 
-    def calculate_pair_returns(asset1_prices, asset2_prices, signals):
-        """Calculate returns for a pairs trading strategy."""
+    def calculate_pair_returns(asset1_prices, asset2_prices, signals, hedge_ratio=1.0):
+        """
+        Calculate returns for a market-neutral pairs trading strategy.
+        Takes simultaneous long/short positions in both assets.
+
+        Args:
+            asset1_prices: Series of prices for first asset
+            asset2_prices: Series of prices for second asset
+            signals: Series of trading signals (-1, 0, or 1)
+            hedge_ratio: Ratio for hedging positions (default 1.0)
+
+        Returns:
+            DataFrame containing:
+            - Individual position returns
+            - Combined strategy returns
+            - Position sizes
+        """
         asset1_returns = asset1_prices.pct_change()
         asset2_returns = asset2_prices.pct_change()
 
-        strategy_returns = signals.shift(1) * (asset1_returns - asset2_returns)
-        return strategy_returns.cumsum()
+        positions = pd.DataFrame(index=signals.index)
 
-    # Calculate returns for each signal type
+        positions['asset1_pos'] = signals.shift(1)
+        positions['asset2_pos'] = -signals.shift(1) * hedge_ratio
+
+        positions['asset1_returns'] = positions['asset1_pos'] * asset1_returns
+        positions['asset2_returns'] = positions['asset2_pos'] * asset2_returns
+
+        positions['strategy_returns'] = positions['asset1_returns'] + positions['asset2_returns']
+
+        positions['cumulative_returns'] = positions['strategy_returns'].cumsum()
+
+        initial_capital = 100000
+        positions['asset1_value'] = initial_capital * positions['asset1_pos']
+        positions['asset2_value'] = initial_capital * positions['asset2_pos']
+
+        positions['total_exposure'] = abs(positions['asset1_value']) + abs(positions['asset2_value'])
+        positions['net_exposure'] = positions['asset1_value'] + positions['asset2_value']
+
+        return positions
+
     strategy_returns = pd.DataFrame({
-        'Mean_Reversion': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ols),
-        'MA_Crossover': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ma),
-        'Bollinger': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_bb),
-        'RSI': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_rsi),
-        'Combined': calculate_pair_returns(stock1['Close'], stock2['Close'], combined_signals)
+        'Mean_Reversion': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ols)['strategy_returns'],
+        'MA_Crossover': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_ma)['strategy_returns'],
+        'Bollinger': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_bb)['strategy_returns'],
+        'RSI': calculate_pair_returns(stock1['Close'], stock2['Close'], signals_rsi)['strategy_returns'],
+        'Combined': calculate_pair_returns(stock1['Close'], stock2['Close'], combined_signals)['strategy_returns']
     })
 
-    # Save performance metrics
     with open(os.path.join(output_dir, 'performance.txt'), 'w') as f:
         f.write("Strategy Performance:\n\n")
         for strategy in strategy_returns.columns:
@@ -461,15 +591,12 @@ def main():
             f.write(f"Final Return: {final_return:.4f}\n")
             f.write(f"Sharpe Ratio: {sharpe:.4f}\n\n")
 
-    # Create visualizations
-    # Price series with signals
     fig1 = make_subplots(rows=2, cols=1, subplot_titles=("Asset Prices", "Combined Signals"))
 
     fig1.add_trace(go.Scatter(x=results.index, y=results['AAPL'], name='AAPL'), row=1, col=1)
     fig1.add_trace(go.Scatter(x=results.index, y=results['MSFT'], name='MSFT'), row=1, col=1)
     fig1.add_trace(go.Scatter(x=results.index, y=combined_signals, name='Combined Signals'), row=2, col=1)
 
-    # Add signal markers for long/short positions
     long_positions = combined_signals == 1
     short_positions = combined_signals == -1
 
@@ -492,12 +619,10 @@ def main():
     fig1.update_layout(height=800, title_text="Pairs Trading Analysis")
     fig1.write_html(os.path.join(output_dir, 'trading_signals.html'))
 
-    # Create spread visualization
     fig2 = make_subplots(rows=2, cols=1, subplot_titles=("OLS Spread", "Signals Comparison"))
 
     fig2.add_trace(go.Scatter(x=results.index, y=ols_spread, name='OLS Spread'), row=1, col=1)
 
-    # Add Bollinger Bands
     roll_mean = ols_spread.rolling(window=20).mean()
     roll_std = ols_spread.rolling(window=20).std()
     upper_band = roll_mean + (2 * roll_std)
@@ -508,7 +633,6 @@ def main():
     fig2.add_trace(go.Scatter(x=results.index, y=lower_band, name='Lower BB',
                              line=dict(dash='dash')), row=1, col=1)
 
-    # Add different signals for comparison
     fig2.add_trace(go.Scatter(x=results.index, y=signals_ols, name='Mean Reversion'), row=2, col=1)
     fig2.add_trace(go.Scatter(x=results.index, y=signals_ma, name='MA Crossover'), row=2, col=1)
     fig2.add_trace(go.Scatter(x=results.index, y=signals_bb, name='Bollinger'), row=2, col=1)
@@ -517,7 +641,6 @@ def main():
     fig2.update_layout(height=800, title_text="Spread Analysis and Signal Comparison")
     fig2.write_html(os.path.join(output_dir, 'spread_analysis.html'))
 
-    # Create returns visualization
     fig3 = go.Figure()
     for strategy in strategy_returns.columns:
         fig3.add_trace(go.Scatter(x=results.index,
@@ -531,7 +654,96 @@ def main():
     fig3.write_html(os.path.join(output_dir, 'strategy_returns.html'))
 
     print(f"\nResults and visualizations saved to {output_dir}")
-    return results, model, strategy_returns
+
+    strategy_positions = {}
+    for signal_type in ['Mean_Reversion', 'MA_Crossover', 'Bollinger', 'RSI', 'Combined']:
+        signals = results[f'{signal_type}_Signals'] if signal_type != 'Combined' else combined_signals
+        strategy_positions[signal_type] = calculate_pair_returns(
+            stock1['Close'],
+            stock2['Close'],
+            signals
+        )
+
+    with open(os.path.join(output_dir, 'enhanced_performance.txt'), 'w') as f:
+        f.write("Enhanced Strategy Performance:\n\n")
+        for strategy, positions in strategy_positions.items():
+            metrics = analyze_strategy_performance(positions)
+            f.write(f"{strategy} Strategy:\n")
+            f.write(f"Total Return: {metrics['total_return']:.4f}\n")
+            f.write(f"Annual Return: {metrics['annual_return']:.4f}\n")
+            f.write(f"Annual Volatility: {metrics['annual_volatility']:.4f}\n")
+            f.write(f"Sharpe Ratio: {metrics['sharpe_ratio']:.4f}\n")
+            f.write(f"Max Drawdown: {metrics['max_drawdown']:.4f}\n")
+            f.write(f"Average Exposure: ${metrics['avg_exposure']:,.2f}\n")
+            f.write(f"Maximum Exposure: ${metrics['max_exposure']:,.2f}\n\n")
+
+    fig4 = make_subplots(
+        rows=3,
+        cols=1,
+        subplot_titles=(
+            "Asset Positions",
+            "Strategy Returns",
+            "Position Exposures"
+        )
+    )
+
+    combined_pos = strategy_positions['Combined']
+
+    fig4.add_trace(
+        go.Scatter(
+            x=combined_pos.index,
+            y=combined_pos['asset1_value'],
+            name='AAPL Position'
+        ),
+        row=1,
+        col=1
+    )
+    fig4.add_trace(
+        go.Scatter(
+            x=combined_pos.index,
+            y=combined_pos['asset2_value'],
+            name='MSFT Position'
+        ),
+        row=1,
+        col=1
+    )
+
+    fig4.add_trace(
+        go.Scatter(
+            x=combined_pos.index,
+            y=combined_pos['cumulative_returns'],
+            name='Strategy Returns'
+        ),
+        row=2,
+        col=1
+    )
+
+    fig4.add_trace(
+        go.Scatter(
+            x=combined_pos.index,
+            y=combined_pos['total_exposure'],
+            name='Total Exposure'
+        ),
+        row=3,
+        col=1
+    )
+    fig4.add_trace(
+        go.Scatter(
+            x=combined_pos.index,
+            y=combined_pos['net_exposure'],
+            name='Net Exposure'
+        ),
+        row=3,
+        col=1
+    )
+
+    fig4.update_layout(
+        height=1200,
+        title_text="Enhanced Pairs Trading Analysis"
+    )
+    fig4.write_html(os.path.join(output_dir, 'enhanced_trading_analysis.html'))
+
+    return results, model, strategy_positions
 
 if __name__ == "__main__":
     results, model, strategy_returns = main()
