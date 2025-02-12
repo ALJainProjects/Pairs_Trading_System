@@ -294,7 +294,7 @@ class OptimizationBackend:
                 # Optimize on training data
                 train_optimizer = MultiStrategyOptimizer(
                     strategy=self.strategy,
-                    returns=train_data,
+                    prices=train_data,
                     strategy_type=self.strategy.__class__.__name__
                 )
                 best_params, best_score = train_optimizer.bayesian_optimize(
@@ -459,7 +459,7 @@ class OptimizationBackend:
             # Run backtest
             backtester = MultiPairBackTester(
                 strategy=self.strategy,
-                returns=eval_data,
+                prices=eval_data,
                 initial_capital=self.config.get('initial_capital', 100000),
                 transaction_cost=self.config.get('transaction_cost', 0.001),
                 max_pairs=self.config.get('max_pairs')

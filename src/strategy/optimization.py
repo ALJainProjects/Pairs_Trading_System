@@ -11,6 +11,7 @@ from config.logging_config import logger
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.strategy.backtest import MultiPairBackTester
+from src.strategy.pairs_strategy_integrated import IntegratedPairsStrategy
 
 
 class BaseStrategyEvaluator:
@@ -157,6 +158,54 @@ class MultiStrategyOptimizer:
                 'learning_rate': (1e-4, 1e-2, 'log')
             }
         }
+
+        if isinstance(self.strategy, IntegratedPairsStrategy):
+            return {
+                'lookback_window': {
+                    'bounds': (10, 252),
+                    'type': 'int',
+                    'scaling': 'linear',
+                    'suggestions': [21, 63, 126]
+                },
+                'zscore_entry': {
+                    'bounds': (1.5, 3.0),
+                    'type': 'float',
+                    'scaling': 'linear',
+                    'suggestions': [2.0, 2.25, 2.5]
+                },
+                'zscore_exit': {
+                    'bounds': (0.0, 1.0),
+                    'type': 'float',
+                    'scaling': 'linear',
+                    'suggestions': [0.5, 0.75]
+                },
+                'stop_loss': {
+                    'bounds': (0.02, 0.2),
+                    'type': 'float',
+                    'scaling': 'log',
+                    'constraints': ['> trailing_stop * 1.5']
+                },
+                'trailing_stop': {
+                    'bounds': (0.01, 0.1),
+                    'type': 'float',
+                    'scaling': 'log',
+                    'constraints': ['< stop_loss / 1.5']
+                },
+                'regime_lookback': {
+                    'bounds': (21, 252),
+                    'type': 'int',
+                    'scaling': 'log',
+                    'suggestions': [63, 126]
+                },
+                'partial_take_profit_levels': {
+                    'options': [
+                        [(0.05, 0.3), (0.08, 0.5)],
+                        [(0.04, 0.3), (0.06, 0.3), (0.08, 0.4)],
+                        [(0.03, 0.25), (0.05, 0.25), (0.07, 0.25), (0.09, 0.25)]
+                    ],
+                    'type': 'categorical'
+                }
+            }
 
         if self.strategy_type not in strategy_params:
             raise ValueError(f"Unknown strategy type: {self.strategy_type}")
