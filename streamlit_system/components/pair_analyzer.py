@@ -11,8 +11,14 @@ from statsmodels.tsa.stattools import coint
 from src.analysis.correlation_analysis import CorrelationAnalyzer
 from src.analysis.cointegration import find_cointegrated_pairs, calculate_half_life
 from src.analysis.clustering_analysis import AssetClusteringAnalyzer
+from src.analysis.denoiser_usage import AssetAnalyzer
 from src.models.statistical import StatisticalModel
 from src.utils.visualization import PlotlyVisualizer
+
+from src.analysis.covariance_estimation import (
+    GraphicalLassoCovariance, KalmanCovariance, OLSCovariance
+)
+
 
 
 class EnhancedPairAnalyzer:
@@ -66,7 +72,7 @@ class EnhancedPairAnalyzer:
             self._render_selected_pairs()
 
     def _render_correlation_analysis(self):
-        """Render correlation analysis section with progress tracking."""
+        """Render correlation analysis with rolling window for standard correlation and denoised covariance option."""
         progress_bar = st.progress(0)
         status_text = st.empty()
         st.subheader("Correlation Analysis")
@@ -74,30 +80,21 @@ class EnhancedPairAnalyzer:
         col1, col2 = st.columns(2)
         with col1:
             correlation_threshold = st.slider(
-                "Correlation Threshold",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.7,
-                step=0.05
+                "Correlation Threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.05
             )
-            lookback = st.number_input(
-                "Lookback Period (days)",
-                min_value=30,
-                max_value=756,
-                value=252
-            )
+            lookback = st.number_input("Lookback Period (days)", min_value=30, max_value=756, value=252)
 
         with col2:
-            correlation_method = st.selectbox(
-                "Correlation Method",
-                ["pearson", "partial"]
-            )
-            rolling_window = st.number_input(
-                "Rolling Window (days)",
-                min_value=20,
-                max_value=756,
-                value=63
-            )
+            correlation_method = st.selectbox("Correlation Method", ["Standard", "Denoised Covariance"])
+
+            if correlation_method == "Standard":
+                rolling_window = st.number_input(
+                    "Rolling Window (days)", min_value=20, max_value=252, value=63
+                )
+
+            elif correlation_method == "Denoised Covariance":
+                covariance_method = st.selectbox("Covariance Method", ["Graphical Lasso", "Kalman", "OLS"])
+                denoising_method = st.selectbox("Denoising Method", ["wavelet", "pca", "none"])
 
         if st.button("Run Correlation Analysis"):
             try:
@@ -106,48 +103,98 @@ class EnhancedPairAnalyzer:
                 returns = self._calculate_returns(st.session_state['historical_data'])
                 returns = returns.tail(lookback)
 
-                status_text.text("Initializing correlation analyzer...")
-                progress_bar.progress(20)
-                self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
+                rolling_corrs = {}  # Ensure rolling_corrs is always initialized
 
-                status_text.text(f"Calculating {correlation_method} correlation matrix...")
-                progress_bar.progress(40)
+                if correlation_method == "Standard":
+                    status_text.text(f"Applying {correlation_method} correlation analysis...")
+                    progress_bar.progress(30)
 
-                if correlation_method == 'pearson':
+                    self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
+
+                    # Compute Pearson or Partial Correlation
                     corr_matrix = self.correlation_analyzer.calculate_pearson_correlation()
+
+                    # Compute rolling correlation
+                    rolling_corrs = self.correlation_analyzer.calculate_rolling_correlation(window=rolling_window)
+
+                    # Identify highly correlated pairs
+                    pairs = self.correlation_analyzer.get_highly_correlated_pairs(
+                        correlation_type="pearson", threshold=correlation_threshold, absolute=True
+                    )
+
+                    # Store pairs in DataFrame
+                    pairs_df = pd.DataFrame(pairs).sort_values(by="correlation", ascending=False)
+
                 else:
-                    corr_matrix = self.correlation_analyzer.calculate_partial_correlation()
+                    status_text.text("Applying denoising and covariance estimation...")
+                    progress_bar.progress(30)
 
-                status_text.text("Identifying correlated pairs...")
-                progress_bar.progress(60)
-                pairs = self.correlation_analyzer.get_highly_correlated_pairs(
-                    correlation_type=correlation_method,
-                    threshold=correlation_threshold,
-                    absolute=True
-                )
+                    # Apply denoising if selected
+                    if denoising_method != "none":
+                        returns = self._calculate_returns(st.session_state['historical_data'], method=denoising_method)
 
+                    # Apply covariance estimation method
+                    if covariance_method == "Graphical Lasso":
+                        covariance_estimator = GraphicalLassoCovariance(alpha=0.1).fit(returns)
+                    elif covariance_method == "Kalman":
+                        covariance_estimator = KalmanCovariance(parameter_set="moderate").fit(returns)
+                    elif covariance_method == "OLS":
+                        covariance_estimator = OLSCovariance(n_factors=5).fit(returns)
+                    else:
+                        raise ValueError("Invalid covariance method selected")
 
-                status_text.text("Computing rolling correlations...")
-                progress_bar.progress(80)
-                rolling_corrs = self.correlation_analyzer.calculate_rolling_correlation(
-                    window=rolling_window
-                )
+                    corr_matrix = covariance_estimator.correlation_
 
-                status_text.text("Storing results...")
-                progress_bar.progress(90)
-                st.session_state['correlation_results'] = {
-                    'matrix': corr_matrix,
-                    'pairs': pairs,
-                    'rolling': rolling_corrs,
-                    'method': correlation_method
-                }
+                    # Identify highly correlated pairs from denoised correlation matrix
+                    pairs = []
+                    for i in range(len(corr_matrix.columns)):
+                        for j in range(i + 1, len(corr_matrix.columns)):
+                            corr_value = corr_matrix.iloc[i, j]
+                            if abs(corr_value) >= correlation_threshold:
+                                pairs.append({
+                                    'asset1': corr_matrix.index[i],
+                                    'asset2': corr_matrix.columns[j],
+                                    'correlation': corr_value
+                                })
+
+                    pairs_df = pd.DataFrame(pairs).sort_values(by="correlation", ascending=False)
 
                 status_text.text("Generating visualizations...")
-                progress_bar.progress(95)
-                self._display_correlation_results(pairs, returns, rolling_corrs, correlation_method)
+                progress_bar.progress(80)
+
+                st.subheader(f"Top Correlated Pairs ({correlation_method})")
+                st.dataframe(pairs_df.round(4))
+
+                # Plot heatmap of correlation matrix
+                fig = go.Figure(data=go.Heatmap(
+                    z=corr_matrix.values,
+                    x=corr_matrix.columns,
+                    y=corr_matrix.index,
+                    colorscale="RdBu",
+                    zmid=0
+                ))
+                fig.update_layout(title=f"{correlation_method} Correlation Matrix")
+                st.plotly_chart(fig)
+
+                # **NEW: Rolling Correlation Chart for Top Pairs in Standard Correlation**
+                if correlation_method == "Standard":
+                    st.subheader(f"Rolling Correlations (Window: {rolling_window} days)")
+
+                    for pair in pairs_df.head(5).itertuples():
+                        asset1 = getattr(pair, "asset1", None)
+                        asset2 = getattr(pair, "asset2", None)
+
+                        if asset1 and asset2:
+                            pair_name = self.correlation_analyzer._validate_pair_name(asset1, asset2)
+
+                            # Ensure the pair exists in rolling correlation results before plotting
+                            if pair_name in rolling_corrs and rolling_corrs[pair_name] is not None:
+                                st.line_chart(rolling_corrs[pair_name])
+                            else:
+                                st.warning(f"No rolling correlation data available for {asset1}-{asset2}")
 
                 progress_bar.progress(100)
-                status_text.success("Correlation analysis complete!")
+                status_text.success(f"{correlation_method} correlation analysis complete!")
 
             except Exception as e:
                 status_text.error(f"Error in correlation analysis: {str(e)}")
@@ -401,15 +448,24 @@ class EnhancedPairAnalyzer:
             time.sleep(1)
             progress_bar.empty()
 
-    def _calculate_returns(self, data: pd.DataFrame) -> pd.DataFrame:
+    def _calculate_returns(self, data: pd.DataFrame, method=None) -> pd.DataFrame:
         """Calculate returns from price data."""
-        prices = data.pivot(
-            index='Date',
-            columns='Symbol',
-            values='Adj_Close'
-        )
-        returns = prices.pct_change().dropna()
-        return returns
+        prices = data.pivot(index='Date', columns='Symbol', values='Adj_Close')
+        raw_returns = prices.pct_change().dropna()
+
+        # Initialize AssetAnalyzer for denoising
+        asset_analyzer = AssetAnalyzer()
+        asset_analyzer.fit(raw_returns)
+
+        # Apply chosen denoising method
+        if method == "wavelet":
+            denoised_returns = asset_analyzer.denoise_wavelet(wavelet='db1', level=1, threshold=0.04)
+        elif method == "pca":
+            denoised_returns = asset_analyzer.denoise_pca(n_components=5)
+        else:
+            denoised_returns = raw_returns  # Default to raw returns if no method is specified
+
+        return denoised_returns
 
     def _get_price_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """Get price data in proper format."""
