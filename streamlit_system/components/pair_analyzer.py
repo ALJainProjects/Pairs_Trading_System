@@ -72,132 +72,193 @@ class EnhancedPairAnalyzer:
             self._render_selected_pairs()
 
     def _render_correlation_analysis(self):
-        """Render correlation analysis with rolling window for standard correlation and denoised covariance option."""
+        """Render correlation analysis section with full history visualization."""
         progress_bar = st.progress(0)
         status_text = st.empty()
         st.subheader("Correlation Analysis")
 
         col1, col2 = st.columns(2)
         with col1:
-            correlation_threshold = st.slider(
-                "Correlation Threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.05
+            min_correlation, max_correlation = st.slider(
+                "Correlation Range",
+                min_value=0.0,
+                max_value=1.0,
+                value=(0.7, 0.95),
+                step=0.05,
+                help="Select minimum and maximum correlation thresholds"
             )
-            lookback = st.number_input("Lookback Period (days)", min_value=30, max_value=756, value=252)
+            lookback = st.number_input(
+                "Lookback Period (days)",
+                min_value=30,
+                max_value=1008,
+                value=504
+            )
 
         with col2:
-            correlation_method = st.selectbox("Correlation Method", ["Standard", "Denoised Covariance"])
-
-            if correlation_method == "Standard":
-                rolling_window = st.number_input(
-                    "Rolling Window (days)", min_value=20, max_value=252, value=63
-                )
-
-            elif correlation_method == "Denoised Covariance":
-                covariance_method = st.selectbox("Covariance Method", ["Graphical Lasso", "Kalman", "OLS"])
-                denoising_method = st.selectbox("Denoising Method", ["wavelet", "pca", "none"])
+            correlation_method = st.selectbox(
+                "Correlation Method",
+                ["pearson", "partial"]
+            )
+            rolling_window = st.number_input(
+                "Rolling Window (days)",
+                min_value=20,
+                max_value=756,
+                value=63
+            )
 
         if st.button("Run Correlation Analysis"):
             try:
                 status_text.text("Calculating returns...")
                 progress_bar.progress(10)
-                returns = self._calculate_returns(st.session_state['historical_data'])
-                returns = returns.tail(lookback)
 
-                rolling_corrs = {}  # Ensure rolling_corrs is always initialized
+                full_returns = self._calculate_returns(st.session_state['historical_data'])
 
-                if correlation_method == "Standard":
-                    status_text.text(f"Applying {correlation_method} correlation analysis...")
-                    progress_bar.progress(30)
+                lookback_returns = full_returns.tail(lookback).copy()
 
-                    self.correlation_analyzer = CorrelationAnalyzer(returns=returns)
+                status_text.text("Initializing correlation analyzer...")
+                progress_bar.progress(20)
 
-                    # Compute Pearson or Partial Correlation
+                self.correlation_analyzer = CorrelationAnalyzer(returns=lookback_returns)
+
+                status_text.text(f"Calculating {correlation_method} correlation matrix...")
+                progress_bar.progress(40)
+
+                if correlation_method == 'pearson':
                     corr_matrix = self.correlation_analyzer.calculate_pearson_correlation()
-
-                    # Compute rolling correlation
-                    rolling_corrs = self.correlation_analyzer.calculate_rolling_correlation(window=rolling_window)
-
-                    # Identify highly correlated pairs
-                    pairs = self.correlation_analyzer.get_highly_correlated_pairs(
-                        correlation_type="pearson", threshold=correlation_threshold, absolute=True
-                    )
-
-                    # Store pairs in DataFrame
-                    pairs_df = pd.DataFrame(pairs).sort_values(by="correlation", ascending=False)
-
                 else:
-                    status_text.text("Applying denoising and covariance estimation...")
-                    progress_bar.progress(30)
+                    corr_matrix = self.correlation_analyzer.calculate_partial_correlation()
 
-                    # Apply denoising if selected
-                    if denoising_method != "none":
-                        returns = self._calculate_returns(st.session_state['historical_data'], method=denoising_method)
+                status_text.text("Identifying correlated pairs...")
+                progress_bar.progress(60)
 
-                    # Apply covariance estimation method
-                    if covariance_method == "Graphical Lasso":
-                        covariance_estimator = GraphicalLassoCovariance(alpha=0.1).fit(returns)
-                    elif covariance_method == "Kalman":
-                        covariance_estimator = KalmanCovariance(parameter_set="moderate").fit(returns)
-                    elif covariance_method == "OLS":
-                        covariance_estimator = OLSCovariance(n_factors=5).fit(returns)
-                    else:
-                        raise ValueError("Invalid covariance method selected")
+                pairs = self.correlation_analyzer.get_highly_correlated_pairs(
+                    correlation_type=correlation_method,
+                    threshold=min_correlation,
+                    absolute=True
+                )
+                pairs = pairs[
+                    (pairs['correlation'].abs() >= min_correlation) &
+                    (pairs['correlation'].abs() <= max_correlation)
+                    ]
+                pairs['abs_correlation'] = pairs['correlation'].abs()
+                pairs = pairs.sort_values('abs_correlation', ascending=False).drop('abs_correlation', axis=1)
 
-                    corr_matrix = covariance_estimator.correlation_
-
-                    # Identify highly correlated pairs from denoised correlation matrix
-                    pairs = []
-                    for i in range(len(corr_matrix.columns)):
-                        for j in range(i + 1, len(corr_matrix.columns)):
-                            corr_value = corr_matrix.iloc[i, j]
-                            if abs(corr_value) >= correlation_threshold:
-                                pairs.append({
-                                    'asset1': corr_matrix.index[i],
-                                    'asset2': corr_matrix.columns[j],
-                                    'correlation': corr_value
-                                })
-
-                    pairs_df = pd.DataFrame(pairs).sort_values(by="correlation", ascending=False)
-
-                status_text.text("Generating visualizations...")
+                status_text.text("Computing rolling correlations...")
                 progress_bar.progress(80)
 
-                st.subheader(f"Top Correlated Pairs ({correlation_method})")
-                st.dataframe(pairs_df.round(4))
+                st.session_state['correlation_results'] = {
+                    'matrix': corr_matrix,
+                    'pairs': pairs,
+                    'method': correlation_method
+                }
 
-                # Plot heatmap of correlation matrix
-                fig = go.Figure(data=go.Heatmap(
-                    z=corr_matrix.values,
-                    x=corr_matrix.columns,
-                    y=corr_matrix.index,
-                    colorscale="RdBu",
-                    zmid=0
-                ))
-                fig.update_layout(title=f"{correlation_method} Correlation Matrix")
-                st.plotly_chart(fig)
+                status_text.text("Generating visualizations...")
+                progress_bar.progress(95)
 
-                # **NEW: Rolling Correlation Chart for Top Pairs in Standard Correlation**
-                if correlation_method == "Standard":
-                    st.subheader(f"Rolling Correlations (Window: {rolling_window} days)")
+                fig_matrix = self.correlation_analyzer.plot_correlation_matrix(
+                    correlation_type=correlation_method,
+                    title=f"{correlation_method.capitalize()} Correlation Matrix"
+                )
+                st.plotly_chart(fig_matrix)
 
-                    for pair in pairs_df.head(5).itertuples():
-                        asset1 = getattr(pair, "asset1", None)
-                        asset2 = getattr(pair, "asset2", None)
+                st.subheader("Top 5 Most Correlated Pairs")
+                if len(pairs) > 0:
+                    top_5_pairs = pairs.head(5)
+                    st.dataframe(top_5_pairs.round(4))
 
-                        if asset1 and asset2:
-                            pair_name = self.correlation_analyzer._validate_pair_name(asset1, asset2)
+                    full_returns_copy = full_returns.copy()
 
-                            # Ensure the pair exists in rolling correlation results before plotting
-                            if pair_name in rolling_corrs and rolling_corrs[pair_name] is not None:
-                                st.line_chart(rolling_corrs[pair_name])
-                            else:
-                                st.warning(f"No rolling correlation data available for {asset1}-{asset2}")
+                    fig = make_subplots(
+                        rows=5,
+                        cols=1,
+                        subplot_titles=[
+                            f"{row['asset1']} - {row['asset2']} "
+                            f"(Full Period: {full_returns[row['asset1']].corr(full_returns[row['asset2']]):.3f}, "
+                            f"Recent: {full_returns[row['asset1']].tail(63).corr(full_returns_copy[row['asset2']].tail(63)):.3f})"
+                            for _, row in top_5_pairs.iterrows()
+                        ],
+                        vertical_spacing=0.05,
+                        row_heights=[300] * 5
+                    )
+
+                    for idx, (_, pair) in enumerate(top_5_pairs.iterrows(), 1):
+                        ticker1, ticker2 = pair['asset1'], pair['asset2']
+
+                        historical_corr = full_returns[ticker1].rolling(window=rolling_window).corr(
+                            full_returns[ticker2])
+
+                        fig.add_trace(
+                            go.Scatter(
+                                x=full_returns.index,
+                                y=historical_corr,
+                                name=f'{ticker1}-{ticker2}',
+                                mode='lines',
+                                line=dict(width=2),
+                                hovertemplate='Date: %{x}<br>Correlation: %{y:.3f}<extra></extra>'
+                            ),
+                            row=idx,
+                            col=1
+                        )
+
+                        fig.update_yaxes(
+                            range=[-1, 1],
+                            title_text="Correlation",
+                            row=idx,
+                            col=1,
+                            gridcolor='lightgray'
+                        )
+
+                        fig.update_xaxes(
+                            gridcolor='lightgray',
+                            row=idx,
+                            col=1,
+                            range=[full_returns.index.min(), full_returns.index.max()]
+                        )
+
+                    fig.update_layout(
+                        height=1500,
+                        title="Historical Correlation Analysis - Top 5 Pairs",
+                        showlegend=True,
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1
+                        ),
+                        plot_bgcolor='white'
+                    )
+
+                    st.plotly_chart(fig)
+
+                    st.subheader("Correlation Stability Metrics")
+                    stability_metrics = []
+                    for _, pair in top_5_pairs.iterrows():
+                        ticker1, ticker2 = pair['asset1'], pair['asset2']
+                        historical_corr = full_returns[ticker1].rolling(window=5).corr(
+                            full_returns[ticker2])
+
+                        metrics = {
+                            'Pair': f"{ticker1}-{ticker2}",
+                            'Full Period Mean': historical_corr.mean(),
+                            'Recent Mean (63d)': historical_corr.tail(63).mean(),
+                            'All-time Min': historical_corr.min(),
+                            'All-time Max': historical_corr.max(),
+                            'Std Dev': historical_corr.std()
+                        }
+                        stability_metrics.append(metrics)
+
+                    st.dataframe(pd.DataFrame(stability_metrics).round(4))
+
+                else:
+                    st.warning("No pairs found within the correlation range.")
 
                 progress_bar.progress(100)
-                status_text.success(f"{correlation_method} correlation analysis complete!")
+                status_text.success("Correlation analysis complete!")
 
             except Exception as e:
                 status_text.error(f"Error in correlation analysis: {str(e)}")
+                st.error(f"Full error: {str(e)}")
             finally:
                 time.sleep(1)
                 progress_bar.empty()
@@ -270,6 +331,7 @@ class EnhancedPairAnalyzer:
 
                 status_text.text("Generating visualizations...")
                 progress_bar.progress(95)
+
                 self._display_cointegration_results(cointegrated_pairs, prices)
 
                 progress_bar.progress(100)
@@ -451,21 +513,31 @@ class EnhancedPairAnalyzer:
     def _calculate_returns(self, data: pd.DataFrame, method=None) -> pd.DataFrame:
         """Calculate returns from price data."""
         prices = data.pivot(index='Date', columns='Symbol', values='Adj_Close')
-        raw_returns = prices.pct_change().dropna()
 
-        # Initialize AssetAnalyzer for denoising
-        asset_analyzer = AssetAnalyzer()
-        asset_analyzer.fit(raw_returns)
+        prices = prices.sort_index()
 
-        # Apply chosen denoising method
+        prices = prices.ffill().bfill()
+
+        raw_returns = prices.pct_change()
+
+        # print("Original Data Shape:", data.shape)
+        # print("Pivoted Prices Shape:", prices.shape)
+        # print("Raw Returns Shape Before Dropna:", raw_returns.shape)
+
+        raw_returns = raw_returns.dropna()
+
+        # print("Raw Returns Shape After Dropna:", raw_returns.shape)
+
         if method == "wavelet":
-            denoised_returns = asset_analyzer.denoise_wavelet(wavelet='db1', level=1, threshold=0.04)
+            asset_analyzer = AssetAnalyzer()
+            asset_analyzer.fit(raw_returns)
+            return asset_analyzer.denoise_wavelet(wavelet='db1', level=1, threshold=0.04)
         elif method == "pca":
-            denoised_returns = asset_analyzer.denoise_pca(n_components=5)
+            asset_analyzer = AssetAnalyzer()
+            asset_analyzer.fit(raw_returns)
+            return asset_analyzer.denoise_pca(n_components=5)
         else:
-            denoised_returns = raw_returns  # Default to raw returns if no method is specified
-
-        return denoised_returns
+            return raw_returns
 
     def _get_price_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """Get price data in proper format."""
@@ -583,37 +655,229 @@ class EnhancedPairAnalyzer:
         except Exception as e:
             st.error(f"Error displaying pair details: {str(e)}")
 
-    def _display_cointegration_results(self,
-                                       cointegrated_pairs: List[Dict],
-                                       prices: pd.DataFrame):
-        """Display cointegration analysis results."""
+    def _display_cointegration_results(self, cointegrated_pairs: List[Dict], prices: pd.DataFrame):
+        """Display cointegration analysis results with separate plots for each pair."""
         if not cointegrated_pairs:
             st.warning("No cointegrated pairs found.")
             return
 
-        pairs_df = pd.DataFrame(cointegrated_pairs)
-        st.dataframe(pairs_df)
+        prices = prices.ffill().bfill()
 
-        pair = st.selectbox(
-            "Select pair for spread analysis",
-            [(p['stock1'], p['stock2']) for p in cointegrated_pairs]
-        )
-        if pair:
-            self._display_spread_analysis(pair, prices)
+        pairs_df = pd.DataFrame(cointegrated_pairs)
+        top_5_pairs = pairs_df.nsmallest(5, 'p_value')
+        st.dataframe(top_5_pairs)
+
+        for _, pair in top_5_pairs.iterrows():
+            ticker1, ticker2 = pair['stock1'], pair['stock2']
+            pair_name = f"{ticker1}-{ticker2}"
+
+            full_spread = StatisticalModel().calculate_spread(
+                prices[ticker1],
+                prices[ticker2]
+            )
+
+            rolling_mean = full_spread.rolling(window=21).mean()
+            rolling_std = full_spread.rolling(window=21).std()
+            upper_band = rolling_mean + 2 * rolling_std
+            lower_band = rolling_mean - 2 * rolling_std
+            z_score = (full_spread - rolling_mean) / rolling_std
+
+            spread_fig = go.Figure()
+
+            spread_fig.add_trace(
+                go.Scatter(
+                    x=full_spread.index,
+                    y=full_spread,
+                    name='Spread',
+                    mode='lines',
+                    line=dict(color='blue')
+                )
+            )
+
+            spread_fig.add_trace(
+                go.Scatter(
+                    x=rolling_mean.index,
+                    y=rolling_mean,
+                    name='Mean',
+                    mode='lines',
+                    line=dict(color='gray', dash='dash')
+                )
+            )
+
+            spread_fig.add_trace(
+                go.Scatter(
+                    x=upper_band.index,
+                    y=upper_band,
+                    name='+2σ',
+                    mode='lines',
+                    line=dict(color='red', dash='dash')
+                )
+            )
+
+            spread_fig.add_trace(
+                go.Scatter(
+                    x=lower_band.index,
+                    y=lower_band,
+                    name='-2σ',
+                    mode='lines',
+                    line=dict(color='red', dash='dash')
+                )
+            )
+
+            latest_spread = full_spread.iloc[-1]
+            spread_fig.add_annotation(
+                x=full_spread.index[-1],
+                y=latest_spread,
+                text=f'Latest Spread: {latest_spread:.2f}',
+                showarrow=True,
+                arrowhead=1
+            )
+
+            spread_fig.update_layout(
+                title=f"Historical Spread: {pair_name}",
+                xaxis_title="Date",
+                yaxis_title="Spread Value",
+                height=500,
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+
+            st.plotly_chart(spread_fig)
+
+            zscore_fig = go.Figure()
+
+            zscore_fig.add_trace(
+                go.Scatter(
+                    x=z_score.index,
+                    y=z_score,
+                    name='Z-Score',
+                    mode='lines',
+                    line=dict(color='purple')
+                )
+            )
+
+            zscore_fig.add_hline(y=2, line_dash="dash", line_color="red")
+            zscore_fig.add_hline(y=-2, line_dash="dash", line_color="red")
+            zscore_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+
+            latest_z = z_score.iloc[-1]
+            zscore_fig.add_annotation(
+                x=z_score.index[-1],
+                y=latest_z,
+                text=f'Latest Z-Score: {latest_z:.2f}',
+                showarrow=True,
+                arrowhead=1
+            )
+
+            zscore_fig.update_layout(
+                title=f"Z-Score Analysis: {pair_name}",
+                xaxis_title="Date",
+                yaxis_title="Z-Score",
+                height=500,
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+
+            st.plotly_chart(zscore_fig)
+
+        stats_data = []
+        for _, pair in top_5_pairs.iterrows():
+            ticker1, ticker2 = pair['stock1'], pair['stock2']
+            spread = StatisticalModel().calculate_spread(
+                prices[ticker1],
+                prices[ticker2]
+            )
+            z_score = (spread - spread.rolling(21).mean()) / spread.rolling(21).std()
+
+            stats = {
+                'Pair': f"{ticker1}-{ticker2}",
+                'Half-Life (days)': pair['half_life'],
+                'P-Value': pair['p_value'],
+                'Spread Std Dev': spread.std(),
+                'Spread Mean': spread.mean(),
+                'Latest Z-Score': z_score.iloc[-1],
+                'Max Z-Score': z_score.max(),
+                'Min Z-Score': z_score.min(),
+                'Mean Reversion Time (days)': np.median(
+                    z_score[abs(z_score) >= 2].index.to_series().diff().dt.days
+                )
+            }
+            stats_data.append(stats)
+
+        stats_df = pd.DataFrame(stats_data)
+        st.write("### Cointegration Statistics")
+        st.dataframe(stats_df.round(4))
 
     def _display_clustering_results(self,
                                     clusters: List[List[str]],
                                     returns: pd.DataFrame):
         """Display clustering analysis results."""
-        for i, cluster in enumerate(clusters, 1):
-            st.write(f"Cluster {i}: {', '.join(cluster)}")
+        full_corr = returns.corr()
 
-        fig = self.clustering_analyzer.plot_cluster_heatmap(
+        st.subheader("Clustering Overview")
+        st.write(f"Total number of clusters: {len(clusters)}")
+        st.write(f"Average cluster size: {np.mean([len(c) for c in clusters]):.2f}")
+
+        sorted_clusters = sorted(clusters, key=len, reverse=True)
+
+        for i, cluster in enumerate(sorted_clusters, 1):
+            with st.expander(f"Cluster {i} ({len(cluster)} assets)", expanded=True):
+                cluster_corr = full_corr.loc[cluster, cluster]
+
+                fig = go.Figure(data=go.Heatmap(
+                    z=cluster_corr.values,
+                    x=cluster_corr.columns,
+                    y=cluster_corr.index,
+                    colorscale='RdBu',
+                    zmid=0,
+                    showscale=True
+                ))
+
+                fig.update_layout(
+                    title=f"Correlation Heatmap - Cluster {i}",
+                    width=800,
+                    height=max(400, len(cluster) * 30),
+                    xaxis_title="Assets",
+                    yaxis_title="Assets"
+                )
+
+                fig.update_xaxes(tickangle=45)
+
+                avg_corr = cluster_corr.values[np.triu_indices_from(cluster_corr.values, k=1)].mean()
+                min_corr = cluster_corr.values[np.triu_indices_from(cluster_corr.values, k=1)].min()
+                max_corr = cluster_corr.values[np.triu_indices_from(cluster_corr.values, k=1)].max()
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Average Correlation", f"{avg_corr:.3f}")
+                col2.metric("Min Correlation", f"{min_corr:.3f}")
+                col3.metric("Max Correlation", f"{max_corr:.3f}")
+
+                st.plotly_chart(fig)
+
+                st.write("**Assets in this cluster:**")
+                st.write(", ".join(sorted(cluster)))
+
+                st.markdown("---")
+
+        st.subheader("Full Clustering Heatmap")
+        full_fig = self.clustering_analyzer.plot_cluster_heatmap(
             returns.corr(),
-            clusters,
-            "Clustered Asset Correlation"
+            sorted_clusters,
+            "Complete Clustered Asset Correlation"
         )
-        st.plotly_chart(fig)
+        st.plotly_chart(full_fig)
 
     def _display_spread_analysis(self, pair: Tuple[str, str], prices: pd.DataFrame):
         """Display spread analysis for a cointegrated pair."""
