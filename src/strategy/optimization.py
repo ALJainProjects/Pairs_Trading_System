@@ -888,10 +888,12 @@ class TransactionCostOptimizer:
 
         return total_cost
 
+
 class MarketImpactModel:
     """
     Model for calculating market impact of trades considering both temporary and permanent impact.
     Implements square-root law for market impact and handles bid-ask spread costs.
+    Compatible with both the optimization backend and MultiPairTradingSystem.
     """
 
     def __init__(
@@ -932,10 +934,10 @@ class MarketImpactModel:
             current_date: Optional[pd.Timestamp] = None
     ) -> Dict[str, float]:
         """
-        Calculate market impact for a trade.
+        Calculate market impact for a trade, compatible with MultiPairTradingSystem.
 
         Args:
-            pair: Trading pair identifier
+            pair: Trading pair identifier (can be tuple, string, or string with '/' separator)
             trade_size: Size of the trade in base currency
             direction: Trade direction (1 for buy, -1 for sell)
             price_data: Historical price data for volatility calculation
@@ -945,6 +947,21 @@ class MarketImpactModel:
         Returns:
             Dict containing temporary impact, permanent impact, and total cost
         """
+        # Ensure consistent handling of pair format
+        if isinstance(pair, str) and '/' in pair:
+            # Handle 'AAPL/MSFT' format
+            symbol1, symbol2 = pair.split('/')
+            pair = (symbol1, symbol2)
+
+        # Extract relevant price data for the pair
+        if price_data is not None and isinstance(pair, tuple):
+            symbol1, symbol2 = pair
+            if symbol1 in price_data.columns and symbol2 in price_data.columns:
+                pair_data = price_data[[symbol1, symbol2]]
+            else:
+                # Fallback to default values if symbols not found
+                return self._get_default_impact(trade_size, direction)
+
         volatility = self._get_volatility(pair, price_data, current_date)
         spread = self._get_spread(pair, price_data, current_date)
         adv = self._get_adv(pair, volume_data, current_date)
@@ -976,6 +993,16 @@ class MarketImpactModel:
             'total_cost': total_cost
         }
 
+    def _get_default_impact(self, trade_size: float, direction: int) -> Dict[str, float]:
+        """Return default impact values when price data is unavailable."""
+        default_impact = 0.001 * abs(trade_size)  # 10 basis points
+        return {
+            'temporary_impact': default_impact * 0.6,
+            'permanent_impact': default_impact * 0.3,
+            'spread_cost': default_impact * 0.1,
+            'total_cost': default_impact
+        }
+
     def _get_volatility(
             self,
             pair: Union[str, Tuple[str, str]],
@@ -988,14 +1015,31 @@ class MarketImpactModel:
                 self._volatility_cache[pair] = {}
 
             if current_date not in self._volatility_cache[pair]:
-                hist_data = price_data.loc[:current_date].tail(self.volatility_window)
-                returns = np.log(hist_data[pair]).diff().dropna()
-                volatility = returns.std() * np.sqrt(252)
-                self._volatility_cache[pair][current_date] = volatility
+                try:
+                    if isinstance(pair, tuple):
+                        symbol1, symbol2 = pair
+                        if symbol1 in price_data.columns and symbol2 in price_data.columns:
+                            # For pairs, we compute the spread volatility
+                            hist_data = price_data.loc[:current_date].tail(self.volatility_window)
+                            spread = np.log(hist_data[symbol2]) - np.log(hist_data[symbol1])
+                            volatility = spread.std() * np.sqrt(252)
+                        else:
+                            # Fallback if symbols not found
+                            return 0.2
+                    else:
+                        # Single asset volatility
+                        hist_data = price_data.loc[:current_date].tail(self.volatility_window)
+                        returns = np.log(hist_data[pair]).diff().dropna()
+                        volatility = returns.std() * np.sqrt(252)
+
+                    self._volatility_cache[pair][current_date] = volatility
+                except Exception as e:
+                    logging.warning(f"Error calculating volatility for {pair}: {e}")
+                    return 0.2
 
             return self._volatility_cache[pair][current_date]
 
-        return 0.2
+        return 0.2  # Default annualized volatility of 20%
 
     def _get_spread(
             self,
@@ -1009,13 +1053,34 @@ class MarketImpactModel:
                 self._spread_cache[pair] = {}
 
             if current_date not in self._spread_cache[pair]:
-                hist_data = price_data.loc[:current_date].tail(self.spread_window)
-                if 'spread' in hist_data.columns:
-                    spread = hist_data['spread'].mean()
-                else:
-                    spread = (hist_data['High'] - hist_data['Low']).mean() / \
-                             hist_data['Close'].mean()
-                self._spread_cache[pair][current_date] = max(spread, self.min_spread)
+                try:
+                    if isinstance(pair, tuple):
+                        symbol1, symbol2 = pair
+                        if symbol1 in price_data.columns and symbol2 in price_data.columns:
+                            # For pairs, estimate spread based on volatility
+                            hist_data = price_data.loc[:current_date].tail(self.spread_window)
+                            spread = min(
+                                (hist_data['High'] - hist_data['Low']).mean() / hist_data['Close'].mean()
+                                if all(col in hist_data.columns for col in ['High', 'Low', 'Close'])
+                                else 0.001,
+                                0.01  # Cap at 1%
+                            )
+                        else:
+                            return self.min_spread
+                    else:
+                        # Single asset spread
+                        hist_data = price_data.loc[:current_date].tail(self.spread_window)
+                        if 'spread' in hist_data.columns:
+                            spread = hist_data['spread'].mean()
+                        elif all(col in hist_data.columns for col in ['High', 'Low', 'Close']):
+                            spread = (hist_data['High'] - hist_data['Low']).mean() / hist_data['Close'].mean()
+                        else:
+                            return self.min_spread
+
+                    self._spread_cache[pair][current_date] = max(spread, self.min_spread)
+                except Exception as e:
+                    logging.warning(f"Error calculating spread for {pair}: {e}")
+                    return self.min_spread
 
             return self._spread_cache[pair][current_date]
 
@@ -1033,13 +1098,28 @@ class MarketImpactModel:
                 self._adv_cache[pair] = {}
 
             if current_date not in self._adv_cache[pair]:
-                hist_data = volume_data.loc[:current_date].tail(self.volatility_window)
-                adv = hist_data[pair].mean()
-                self._adv_cache[pair][current_date] = adv
+                try:
+                    if isinstance(pair, tuple):
+                        symbol1, symbol2 = pair
+                        if symbol1 in volume_data.columns and symbol2 in volume_data.columns:
+                            hist_data = volume_data.loc[:current_date].tail(self.volatility_window)
+                            # Use minimum of the pair's volumes for conservative estimate
+                            adv = min(hist_data[symbol1].mean(), hist_data[symbol2].mean())
+                        else:
+                            return 1e6  # Default 1 million units
+                    else:
+                        # Single asset volume
+                        hist_data = volume_data.loc[:current_date].tail(self.volatility_window)
+                        adv = hist_data[pair].mean()
+
+                    self._adv_cache[pair][current_date] = adv
+                except Exception as e:
+                    logging.warning(f"Error calculating ADV for {pair}: {e}")
+                    return 1e6
 
             return self._adv_cache[pair][current_date]
 
-        return 1e6
+        return 1e6  # Default 1 million units
 
     def _calculate_temporary_impact(
             self,
@@ -1152,6 +1232,7 @@ class MarketImpactModel:
         max_trade_size = adv * 0.1
         trade_sizes = trade_sizes.clip(upper=max_trade_size)
 
+        # Rescale to ensure sum equals total_size
         trade_sizes = trade_sizes * (total_size / trade_sizes.sum())
 
         return trade_sizes

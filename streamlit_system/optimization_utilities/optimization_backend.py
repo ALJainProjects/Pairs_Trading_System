@@ -2,7 +2,7 @@
 Complete optimization backend implementation with all methodologies.
 """
 import json
-from typing import Dict, Tuple, Optional, Any, List, Callable
+from typing import Dict, Tuple, Optional, Any, List, Callable, Union
 import pandas as pd
 import numpy as np
 import optuna
@@ -82,6 +82,80 @@ class OptimizationResult:
         if self.equity_curve is not None:
             result['equity_curve'] = self.equity_curve.to_dict()
         return result
+
+
+class MultiPairStrategyBridge:
+    """Bridge class to integrate MultiPairTradingSystem with OptimizationBackend."""
+
+    def __init__(self, data: pd.DataFrame, pairs: List[Tuple[str, str]], initial_capital: float = 1500000):
+        """Initialize the bridge."""
+        self.data = data
+        self.pairs = pairs
+        self.initial_capital = initial_capital
+        self.system = None
+        self.parameter_space = self._define_parameter_space()
+
+    def _define_parameter_space(self) -> Dict:
+        """Define the parameter space for optimization."""
+        return {
+            'window_size': (30, 252),
+            'threshold': (1.0, 3.0),
+            'stop_loss_pct': (0.02, 0.10),
+            'profit_target_pct': (0.02, 0.15),
+            'loss_limit_pct': (0.01, 0.05),
+            'max_holding_period': (10, 60),
+            'capital_utilization': (0.5, 0.9)
+        }
+
+    def create_strategy(self, params: Dict) -> Any:
+        """Create a MultiPairTradingSystem with given parameters."""
+        # Import here to avoid circular imports
+        from src.strategy.strategy_builder import MultiPairTradingSystem
+
+        return MultiPairTradingSystem(
+            pairs=self.pairs,
+            prices=self.data,
+            initial_capital=self.initial_capital,
+            window_size=params.get('window_size', 90),
+            threshold=params.get('threshold', 2.0),
+            transaction_cost_bps=params.get('transaction_cost_bps', 1.0),
+            stop_loss_pct=params.get('stop_loss_pct', 0.05),
+            capital_utilization=params.get('capital_utilization', 0.8),
+            max_holding_period=params.get('max_holding_period', 30),
+            profit_target_pct=params.get('profit_target_pct', 0.05),
+            loss_limit_pct=params.get('loss_limit_pct', 0.03),
+            capital_reallocation_freq=params.get('capital_reallocation_freq', 60)
+        )
+
+    def evaluate(self, params: Dict) -> Tuple[float, Dict]:
+        """Evaluate parameters and return score and metrics."""
+        try:
+            system = self.create_strategy(params)
+            system.run_backtest()
+            metrics = system.get_portfolio_metrics()
+
+            # Extract performance metrics
+            portfolio_metrics = metrics.get('Portfolio Metrics', {})
+            sharpe_ratio = portfolio_metrics.get('Sharpe Ratio', 0)
+            max_drawdown = portfolio_metrics.get('Max Drawdown (%)', 100)
+            total_return = portfolio_metrics.get('Total Return (%)', 0)
+
+            # Calculate score (maximize Sharpe, minimize drawdown)
+            score = sharpe_ratio - 0.5 * max_drawdown / 100
+
+            # Store the system for the best parameters
+            self.system = system
+
+            return score, {
+                'sharpe_ratio': sharpe_ratio,
+                'max_drawdown': max_drawdown,
+                'total_return': total_return,
+                'equity_curve': pd.DataFrame(system.portfolio_history).set_index('date')['portfolio_value']
+            }
+
+        except Exception as e:
+            logging.error(f"Error evaluating parameters: {str(e)}")
+            return float('-inf'), {}
 
 
 # ====== Main Optimizer Class ======
@@ -208,6 +282,72 @@ class OptimizationBackend:
 
         except Exception as e:
             logging.error(f"Optimization error: {str(e)}")
+            raise
+
+    def optimize_multi_pair_strategy(
+            self,
+            data: pd.DataFrame,
+            pairs: List[Tuple[str, str]],
+            initial_capital: float = 1500000,
+            method: str = 'bayesian',
+            n_trials: int = 100,
+            progress_callback: Optional[Callable[[float], None]] = None,
+            status_callback: Optional[Callable[[str], None]] = None
+    ) -> Dict[str, Any]:
+        """Optimize MultiPairTradingSystem parameters."""
+        try:
+            start_time = time.time()
+            bridge = MultiPairStrategyBridge(data, pairs, initial_capital)
+
+            def objective(trial):
+                params = {}
+                for param, bounds in bridge.parameter_space.items():
+                    if isinstance(bounds[0], int):
+                        params[param] = trial.suggest_int(param, bounds[0], bounds[1])
+                    else:
+                        params[param] = trial.suggest_float(param, bounds[0], bounds[1])
+
+                score, _ = bridge.evaluate(params)
+
+                if progress_callback:
+                    progress_callback(trial.number / n_trials)
+                if status_callback:
+                    status_callback(f"Trial {trial.number}: Score = {score:.4f}")
+
+                return score
+
+            study = optuna.create_study(direction='maximize')
+            study.optimize(objective, n_trials=n_trials)
+
+            # Evaluate best parameters for detailed metrics
+            _, best_metrics = bridge.evaluate(study.best_params)
+
+            results = {
+                'best_parameters': study.best_params,
+                'best_score': study.best_value,
+                'metrics': best_metrics,
+                'optimization_history': [
+                    {
+                        'trial': t.number,
+                        'score': t.value,
+                        'params': t.params
+                    }
+                    for t in study.trials
+                ],
+                'system': bridge.system,  # Return the optimized system
+                'time_taken': time.time() - start_time,
+                'optimization_method': method,
+                'data_info': {
+                    'start_date': data.index[0],
+                    'end_date': data.index[-1],
+                    'n_assets': len(data.columns)
+                }
+            }
+
+            return results
+
+        except Exception as e:
+            logging.error(f"Multi-pair optimization error: {str(e)}")
             raise
 
     def _run_bayesian_optimization(
