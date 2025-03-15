@@ -10,6 +10,7 @@ from sklearn.linear_model import LinearRegression
 
 from config.logging_config import logger
 from src.strategy.backtest import MultiPairBackTester
+from src.strategy.dynamic_pairs_strategy import DynamicPairTradingSystem
 from src.strategy.pairs_strategy_integrated import IntegratedPairsStrategy, create_strategy_dashboard
 from src.strategy.risk import PairRiskManager
 from src.strategy.pairs_strategy_SL import EnhancedStatPairsStrategy
@@ -1379,7 +1380,6 @@ class MultiPairTradingSystem:
 
         return fig
 
-
 def find_correlated_pairs(prices_df: pd.DataFrame, correlation_threshold: float = 0.7, max_pairs: int = 10) -> List[
     Tuple[str, str]]:
     """
@@ -1598,12 +1598,183 @@ class EnhancedStrategyBuilder:
 
         strategy_type = st.selectbox(
             "Strategy Type",
-            ["Integrated", "Statistical", "Machine Learning", "Deep Learning", "Multi-Pair Statistical"]
+            ["Integrated", "Statistical", "Machine Learning", "Deep Learning", "Multi-Pair Statistical",
+             "Dynamic Pairs Trading"]
         )
 
         params = {}
 
-        if strategy_type == "Integrated":
+        if strategy_type == "Dynamic Pairs Trading":
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("### Core Parameters")
+                params.update({
+                    'initial_capital': st.number_input(
+                        "Initial Capital",
+                        min_value=100000,
+                        max_value=10000000,
+                        value=1500000,
+                        step=100000
+                    ),
+                    'window_size': st.number_input(
+                        "Window Size (days)",
+                        min_value=30,
+                        max_value=252,
+                        value=90
+                    ),
+                    'threshold': st.number_input(
+                        "Z-Score Threshold",
+                        min_value=0.5,
+                        max_value=4.0,
+                        value=2.0,
+                        step=0.1
+                    ),
+                    'transaction_cost_bps': st.number_input(
+                        "Transaction Cost (bps)",
+                        min_value=0.0,
+                        max_value=20.0,
+                        value=1.0,
+                        step=0.1
+                    ),
+                    'max_active_pairs': st.number_input(
+                        "Maximum Active Pairs",
+                        min_value=1,
+                        max_value=20,
+                        value=15
+                    )
+                })
+
+            with col2:
+                st.markdown("### Risk Parameters")
+                params.update({
+                    'stop_loss_pct': st.number_input(
+                        "Stop Loss (%)",
+                        min_value=1.0,
+                        max_value=20.0,
+                        value=5.0,
+                        step=0.5
+                    ) / 100,
+                    'capital_utilization': st.number_input(
+                        "Capital Utilization",
+                        min_value=0.1,
+                        max_value=1.0,
+                        value=0.8,
+                        step=0.1
+                    ),
+                    'max_holding_period': st.number_input(
+                        "Max Holding Period (days)",
+                        min_value=5,
+                        max_value=90,
+                        value=30
+                    ),
+                    'profit_target_pct': st.number_input(
+                        "Profit Target (%)",
+                        min_value=1.0,
+                        max_value=20.0,
+                        value=5.0,
+                        step=0.5
+                    ) / 100,
+                    'loss_limit_pct': st.number_input(
+                        "Loss Limit (%)",
+                        min_value=1.0,
+                        max_value=15.0,
+                        value=3.0,
+                        step=0.5
+                    ) / 100
+                })
+
+            st.markdown("### Pair Selection & Evaluation Parameters")
+            col3, col4 = st.columns(2)
+
+            with col3:
+                params.update({
+                    'pair_evaluation_freq': st.number_input(
+                        "Pair Evaluation Frequency (days)",
+                        min_value=5,
+                        max_value=60,
+                        value=20
+                    ),
+                    'universe_reevaluation_freq': st.number_input(
+                        "Universe Reevaluation Frequency (days)",
+                        min_value=20,
+                        max_value=120,
+                        value=60
+                    ),
+                    'capital_reallocation_freq': st.number_input(
+                        "Capital Reallocation Frequency (days)",
+                        min_value=10,
+                        max_value=120,
+                        value=60
+                    )
+                })
+
+            with col4:
+                params.update({
+                    'min_cointegration_pvalue': st.number_input(
+                        "Min. Cointegration P-value",
+                        min_value=0.01,
+                        max_value=0.2,
+                        value=0.05,
+                        step=0.01
+                    ),
+                    'min_correlation': st.number_input(
+                        "Min. Correlation",
+                        min_value=0.4,
+                        max_value=0.9,
+                        value=0.6,
+                        step=0.05
+                    ),
+                    'volatility_adjustment_factor': st.number_input(
+                        "Volatility Adjustment Factor",
+                        min_value=0.5,
+                        max_value=3.0,
+                        value=1.5,
+                        step=0.1
+                    )
+                })
+
+            st.markdown("### Advanced Parameters")
+            col5, col6 = st.columns(2)
+
+            with col5:
+                params.update({
+                    'lookback_window': st.number_input(
+                        "Lookback Window for Stability Tests (days)",
+                        min_value=63,
+                        max_value=756,
+                        value=252
+                    ),
+                    'min_data_points': st.number_input(
+                        "Minimum Data Points Required",
+                        min_value=100,
+                        max_value=500,
+                        value=252
+                    )
+                })
+
+            # Pair selection method
+            with col6:
+                pair_selection = st.radio(
+                    "Pair Selection Method",
+                    ["Use Selected Pairs", "Auto-Generate Pairs"]
+                )
+
+                if pair_selection == "Auto-Generate Pairs":
+                    params.update({
+                        'auto_generate_pairs': True,
+                        'max_pairs_to_generate': st.number_input(
+                            "Number of Pairs to Generate",
+                            min_value=5,
+                            max_value=30,
+                            value=15
+                        )
+                    })
+                else:
+                    params.update({
+                        'auto_generate_pairs': False
+                    })
+        elif strategy_type == "Integrated":
             col1, col2, col3 = st.columns(3)
 
             with col1:
@@ -2201,6 +2372,775 @@ class EnhancedStrategyBuilder:
             'max_pairs': max_pairs
         }
 
+    def _streamlit_plot_pair_rotation(self, dynamic_system):
+        """Create a Streamlit-compatible visualization showing pair rotation over time"""
+        st.subheader("Pair Rotation Timeline")
+
+        if not dynamic_system.portfolio_history:
+            st.warning("No portfolio history available to plot pair rotation")
+            return
+
+        # Convert all trade history to DataFrame
+        all_trades = dynamic_system.trade_history
+
+        if not all_trades:
+            st.warning("No trade history available to plot pair rotation")
+            return
+
+        trades_df = pd.DataFrame(all_trades)
+
+        # Get unique pair IDs from trades
+        all_pair_ids = trades_df['pair_id'].unique() if 'pair_id' in trades_df.columns else []
+
+        if len(all_pair_ids) == 0:
+            st.warning("No pair IDs found in trade history")
+            return
+
+        # Create a timeline of active pairs
+        dates = [d['date'] for d in dynamic_system.portfolio_history]
+        date_range = pd.date_range(start=min(dates), end=max(dates), freq='D')
+
+        # Create a dataframe for pair activity
+        pair_activity = {}
+        for pair_id in all_pair_ids:
+            # Filter trades for this pair
+            pair_trades = trades_df[trades_df['pair_id'] == pair_id]
+
+            # Create a series of 1s for active days, 0s for inactive
+            activity = pd.Series(0, index=date_range)
+
+            # Group by date to handle multiple trades on same day
+            daily_trades = pair_trades.groupby('date').size()
+
+            # Set active days as 1
+            for date in daily_trades.index:
+                activity[date] = 1
+
+            pair_activity[f"{pair_id[0]}-{pair_id[1]}"] = activity
+
+        # Create a dataframe with all pair activity
+        if pair_activity:
+            activity_df = pd.DataFrame(pair_activity)
+
+            # Create a Plotly figure for Streamlit
+            from plotly.subplots import make_subplots
+            import plotly.graph_objects as go
+
+            fig = go.Figure()
+
+            # Plot each pair's activity
+            for i, pair_name in enumerate(activity_df.columns):
+                active_dates = activity_df.index[activity_df[pair_name] == 1]
+                if len(active_dates) > 0:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=active_dates,
+                            y=[i] * len(active_dates),
+                            mode='markers',
+                            marker=dict(symbol='line-ns', size=15, line=dict(width=1)),
+                            name=pair_name
+                        )
+                    )
+
+            # Update the layout
+            fig.update_layout(
+                title='Pair Trading Activity Timeline',
+                xaxis_title='Date',
+                yaxis_title='Pair',
+                yaxis=dict(
+                    tickmode='array',
+                    tickvals=list(range(len(activity_df.columns))),
+                    ticktext=activity_df.columns
+                ),
+                height=500 + 20 * len(activity_df.columns),
+                width=900,
+                showlegend=True
+            )
+
+            # Add grid lines
+            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
+
+            # Display in Streamlit
+            st.plotly_chart(fig)
+
+    def _streamlit_plot_market_volatility(self, dynamic_system):
+        """Create a Streamlit-compatible plot of market volatility over time"""
+        st.subheader("Market Volatility Analysis")
+
+        if not dynamic_system.market_state_history:
+            st.warning("No market state history available to plot")
+            return
+
+        # Convert to DataFrame
+        vol_df = pd.DataFrame(dynamic_system.market_state_history)
+        vol_df.set_index('date', inplace=True)
+
+        fig = go.Figure()
+
+        # Plot volatility ratio
+        fig.add_trace(
+            go.Scatter(
+                x=vol_df.index,
+                y=vol_df['volatility_ratio'],
+                mode='lines',
+                name='Volatility Ratio',
+                line=dict(color='blue', width=2)
+            )
+        )
+
+        # Add a horizontal line at the threshold
+        fig.add_trace(
+            go.Scatter(
+                x=[vol_df.index[0], vol_df.index[-1]],
+                y=[1.5, 1.5],
+                mode='lines',
+                name='High Volatility Threshold',
+                line=dict(color='red', width=1, dash='dash')
+            )
+        )
+
+        # Shade high volatility regions
+        high_vol = vol_df['is_high_volatility']
+
+        # Find contiguous regions
+        if any(high_vol):
+            switches = high_vol.diff().fillna(0).astype(int)
+            starts = vol_df.index[switches == 1].tolist()
+            ends = vol_df.index[switches == -1].tolist()
+
+            # If it starts in high volatility
+            if high_vol.iloc[0]:
+                starts.insert(0, vol_df.index[0])
+
+            # If it ends in high volatility
+            if high_vol.iloc[-1]:
+                ends.append(vol_df.index[-1])
+
+            # Add shaded regions
+            for start, end in zip(starts, ends):
+                fig.add_vrect(
+                    x0=start, x1=end,
+                    fillcolor="red", opacity=0.15,
+                    layer="below", line_width=0,
+                )
+
+        # Update layout
+        fig.update_layout(
+            title='Market Volatility Over Time',
+            xaxis_title='Date',
+            yaxis_title='Volatility Ratio',
+            height=500,
+            width=900,
+        )
+
+        # Display in Streamlit
+        st.plotly_chart(fig)
+
+    def _streamlit_plot_pair_metrics(self, dynamic_system):
+        """Create a Streamlit-compatible plot of pair quality metrics"""
+        st.subheader("Pair Quality Metrics")
+
+        if not dynamic_system.pair_quality_metrics:
+            st.warning("No pair quality metrics available to plot")
+            return
+
+        # Prepare the data
+        pairs = list(dynamic_system.pair_quality_metrics.keys())
+
+        if not pairs:
+            st.warning("No pairs with quality metrics found")
+            return
+
+        # Create a DataFrame for easier plotting with Plotly
+        metrics_data = []
+        for pair in pairs:
+            pair_name = f"{pair[0]}-{pair[1]}"
+            metrics = dynamic_system.pair_quality_metrics[pair]
+            metrics_data.append({
+                'pair': pair_name,
+                'correlation': metrics.get('correlation', 0),
+                'pvalue': metrics.get('pvalue', 1.0),
+                'score': metrics.get('score', 0)
+            })
+
+        metrics_df = pd.DataFrame(metrics_data)
+
+        # Create separate plots for each metric
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        # Define metrics to plot
+        metrics_to_plot = ['correlation', 'pvalue', 'score']
+
+        # Create subplots
+        fig = make_subplots(
+            rows=len(metrics_to_plot),
+            cols=1,
+            subplot_titles=[f'Pair {metric.capitalize()}' for metric in metrics_to_plot],
+            vertical_spacing=0.1
+        )
+
+        # Add bars for each metric
+        for i, metric in enumerate(metrics_to_plot):
+            fig.add_trace(
+                go.Bar(
+                    x=metrics_df['pair'],
+                    y=metrics_df[metric],
+                    name=metric.capitalize()
+                ),
+                row=i + 1, col=1
+            )
+
+        # Update layout
+        fig.update_layout(
+            height=300 * len(metrics_to_plot),
+            width=900,
+            showlegend=False
+        )
+
+        # Customize y-axis titles
+        for i, metric in enumerate(metrics_to_plot):
+            fig.update_yaxes(title_text=metric.capitalize(), row=i + 1, col=1)
+
+        # Rotate x-axis labels if many pairs
+        if len(pairs) > 5:
+            fig.update_xaxes(tickangle=45)
+
+        # Display in Streamlit
+        st.plotly_chart(fig)
+
+    def _streamlit_plot_portfolio_overview(self, dynamic_system):
+        """Create a Streamlit-compatible enhanced portfolio overview"""
+        st.subheader("Portfolio Overview with Volatility Regime")
+
+        if not dynamic_system.portfolio_history:
+            st.warning("No portfolio history available to plot")
+            return
+
+        portfolio_df = pd.DataFrame(dynamic_system.portfolio_history)
+        portfolio_df.set_index('date', inplace=True)
+
+        # Create a merged dataframe with volatility info if available
+        if dynamic_system.market_state_history:
+            vol_df = pd.DataFrame(dynamic_system.market_state_history)
+            vol_df.set_index('date', inplace=True)
+
+            # Align the indices (may have different frequencies)
+            merged = portfolio_df.join(vol_df[['is_high_volatility', 'volatility_ratio']], how='left')
+
+            # Fill any missing volatility data
+            merged['is_high_volatility'].fillna(False, inplace=True)
+            merged['volatility_ratio'].fillna(1.0, inplace=True)
+        else:
+            merged = portfolio_df.copy()
+            merged['is_high_volatility'] = False
+            merged['volatility_ratio'] = 1.0
+
+        # Create Plotly figure
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.08,
+            subplot_titles=('Portfolio Value with Volatility Regime', 'Active Pairs and Volatility Ratio')
+        )
+
+        # Plot portfolio value
+        fig.add_trace(
+            go.Scatter(
+                x=merged.index,
+                y=merged['portfolio_value'],
+                mode='lines',
+                name='Portfolio Value',
+                line=dict(color='blue', width=2)
+            ),
+            row=1, col=1
+        )
+
+        # Add initial capital reference line
+        fig.add_trace(
+            go.Scatter(
+                x=[merged.index[0], merged.index[-1]],
+                y=[dynamic_system.initial_capital, dynamic_system.initial_capital],
+                mode='lines',
+                name='Initial Capital',
+                line=dict(color='black', width=1, dash='dash')
+            ),
+            row=1, col=1
+        )
+
+        # Shade high volatility regions
+        high_vol = merged['is_high_volatility']
+
+        # Find contiguous regions
+        if any(high_vol):
+            switches = high_vol.diff().fillna(0).astype(int)
+            starts = merged.index[switches == 1].tolist()
+            ends = merged.index[switches == -1].tolist()
+
+            # If it starts in high volatility
+            if high_vol.iloc[0]:
+                starts.insert(0, merged.index[0])
+
+            # If it ends in high volatility
+            if high_vol.iloc[-1]:
+                ends.append(merged.index[-1])
+
+            # Add shaded regions to both subplots
+            for start, end in zip(starts, ends):
+                fig.add_vrect(
+                    x0=start, x1=end,
+                    fillcolor="red", opacity=0.15,
+                    layer="below", line_width=0,
+                    row=1, col=1
+                )
+                fig.add_vrect(
+                    x0=start, x1=end,
+                    fillcolor="red", opacity=0.15,
+                    layer="below", line_width=0,
+                    row=2, col=1
+                )
+
+        # Plot active pairs
+        fig.add_trace(
+            go.Scatter(
+                x=merged.index,
+                y=merged['active_pairs'],
+                mode='lines',
+                name='Active Pairs',
+                line=dict(color='purple', width=2)
+            ),
+            row=2, col=1
+        )
+
+        # Add volatility ratio on secondary y-axis
+        fig.add_trace(
+            go.Scatter(
+                x=merged.index,
+                y=merged['volatility_ratio'],
+                mode='lines',
+                name='Volatility Ratio',
+                line=dict(color='red', width=1.5),
+                yaxis="y3"
+            ),
+            row=2, col=1
+        )
+
+        # Add threshold line on secondary y-axis
+        fig.add_trace(
+            go.Scatter(
+                x=[merged.index[0], merged.index[-1]],
+                y=[1.5, 1.5],
+                mode='lines',
+                name='Volatility Threshold',
+                line=dict(color='red', width=1, dash='dash'),
+                yaxis="y3"
+            ),
+            row=2, col=1
+        )
+
+        # Update layout with secondary y-axis
+        fig.update_layout(
+            yaxis3=dict(
+                title="Volatility Ratio",
+                titlefont=dict(color="red"),
+                tickfont=dict(color="red"),
+                anchor="x",
+                overlaying="y2",
+                side="right"
+            ),
+            height=800,
+            width=900,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+
+        # Set y-axis titles
+        fig.update_yaxes(title_text="Portfolio Value ($)", row=1, col=1)
+        fig.update_yaxes(title_text="Active Pairs", row=2, col=1)
+
+        # Display in Streamlit
+        st.plotly_chart(fig)
+
+    def _run_dynamic_pairs_backtest(self, prices: pd.DataFrame, pairs: List[Tuple[str, str]],
+                                    params: Dict, backtest_params: Dict):
+        """
+        Run backtest with the Dynamic Pairs Trading strategy with Streamlit integration.
+
+        Args:
+            prices: Price data
+            pairs: Selected pairs for trading
+            params: Strategy parameters
+            backtest_params: General backtest configuration
+        """
+        # Get price data in pivot format (required for DynamicPairTradingSystem)
+        if 'pivot_prices' in st.session_state:
+            prices_df = st.session_state['pivot_prices']
+        else:
+            # Create pivot table from historical data
+            data = st.session_state['historical_data']
+            data['Date'] = pd.to_datetime(data['Date'])
+
+            prices_df = data.pivot(
+                index='Date',
+                columns='Symbol',
+                values='Adj_Close'
+            )
+            prices_df = prices_df.sort_index()
+            prices_df = prices_df.ffill().bfill()
+            st.session_state['pivot_prices'] = prices_df
+
+        # Handle pair generation if auto-generate is selected
+        initial_pairs = None
+        if not params.get('auto_generate_pairs', False):
+            initial_pairs = pairs
+
+        # Create the dynamic pairs trading system
+        with st.spinner("Initializing Dynamic Pairs Trading System..."):
+            dynamic_system = DynamicPairTradingSystem(
+                prices=prices_df,
+                initial_pairs=initial_pairs,
+                initial_capital=params.get('initial_capital', 1500000),
+                window_size=params.get('window_size', 90),
+                threshold=params.get('threshold', 2.0),
+                transaction_cost_bps=params.get('transaction_cost_bps', 1),
+                stop_loss_pct=params.get('stop_loss_pct', 0.05),
+                capital_utilization=params.get('capital_utilization', 0.8),
+                max_holding_period=params.get('max_holding_period', 30),
+                profit_target_pct=params.get('profit_target_pct', 0.05),
+                loss_limit_pct=params.get('loss_limit_pct', 0.03),
+                capital_reallocation_freq=params.get('capital_reallocation_freq', 60),
+                max_active_pairs=params.get('max_active_pairs', 15),
+                pair_evaluation_freq=params.get('pair_evaluation_freq', 20),
+                universe_reevaluation_freq=params.get('universe_reevaluation_freq', 60),
+                min_cointegration_pvalue=params.get('min_cointegration_pvalue', 0.05),
+                min_correlation=params.get('min_correlation', 0.6),
+                lookback_window=params.get('lookback_window', 252),
+                volatility_adjustment_factor=params.get('volatility_adjustment_factor', 1.5),
+                min_data_points=params.get('min_data_points', 252)
+            )
+
+        # Run the backtest (not run_strategy to avoid matplotlib plots)
+        with st.spinner("Running Dynamic Pairs Trading backtest..."):
+            # Set initial dates to avoid immediate evaluation
+            first_date = dynamic_system.prices.index[0]
+            dynamic_system.last_pair_evaluation = first_date
+            dynamic_system.last_universe_evaluation = first_date
+
+            # Run backtest
+            dynamic_system.run_backtest()
+
+            # Get portfolio metrics
+            metrics = dynamic_system.get_portfolio_metrics()
+
+        # Display metrics and visualizations
+        st.subheader("Dynamic Pairs Trading Results")
+
+        # Overview metrics
+        col1, col2, col3, col4 = st.columns(4)
+        total_return = metrics['Portfolio Metrics'].get('Total Return (%)', 0)
+        with col1:
+            st.metric(
+                "Total Return",
+                f"{total_return:.2f}%" if isinstance(total_return, (int, float)) else total_return
+            )
+
+        sharpe = metrics['Portfolio Metrics'].get('Sharpe Ratio', 0)
+        with col2:
+            st.metric(
+                "Sharpe Ratio",
+                f"{sharpe:.2f}" if isinstance(sharpe, (int, float)) else sharpe
+            )
+
+        drawdown = metrics['Portfolio Metrics'].get('Max Drawdown (%)', 0)
+        with col3:
+            st.metric(
+                "Max Drawdown",
+                f"{drawdown:.2f}%" if isinstance(drawdown, (int, float)) else drawdown
+            )
+
+        win_rate = metrics['Trading Activity'].get('Average Win Rate (%)', 0)
+        with col4:
+            st.metric(
+                "Win Rate",
+                f"{win_rate:.2f}%" if isinstance(win_rate, (int, float)) else win_rate
+            )
+
+        # Display Streamlit-compatible visualizations
+        self._streamlit_plot_portfolio_overview(dynamic_system)
+        self._streamlit_plot_pair_rotation(dynamic_system)
+        self._streamlit_plot_market_volatility(dynamic_system)
+        self._streamlit_plot_pair_metrics(dynamic_system)
+
+        # Display individual pair analyses
+        st.subheader("Individual Pair Analysis")
+
+        # Select which pair to view
+        all_pairs = list(dynamic_system.pair_models.keys())
+        if all_pairs:
+            selected_pair = st.selectbox(
+                "Select a pair to analyze:",
+                options=all_pairs,
+                format_func=lambda p: f"{p[0]}-{p[1]}"
+            )
+
+            with st.spinner(f"Generating analysis for {selected_pair[0]}-{selected_pair[1]}..."):
+                model = dynamic_system.pair_models[selected_pair]
+
+                # Get metrics for this pair
+                pair_metrics = model.get_metrics()
+
+                # Display key pair metrics
+                pair_cols = st.columns(4)
+                pair_cols[0].metric(
+                    "Pair Return",
+                    f"{pair_metrics.get('total_return', 0):.2f}%"
+                )
+                pair_cols[1].metric(
+                    "Win Rate",
+                    f"{pair_metrics.get('win_rate', 0):.2f}%"
+                )
+                pair_cols[2].metric(
+                    "Profit Factor",
+                    f"{pair_metrics.get('profit_factor', 0):.2f}"
+                )
+                pair_cols[3].metric(
+                    "# Trades",
+                    pair_metrics.get('num_trades', 0)
+                )
+
+                # Create and display pair visualization using Plotly
+                if model.portfolio_history and model.spread_history:
+                    self._display_pair_analysis_plotly(model)
+                else:
+                    st.warning("Insufficient data to generate pair analysis visualization")
+        else:
+            st.warning("No pairs available for analysis")
+
+        # Detailed metrics in expandable sections
+        with st.expander("Portfolio Metrics", expanded=False):
+            for category, category_metrics in metrics.items():
+                st.write(f"### {category}")
+                metrics_df = pd.DataFrame(
+                    {k: [v] for k, v in category_metrics.items()}
+                ).T.reset_index()
+                metrics_df.columns = ['Metric', 'Value']
+                st.dataframe(metrics_df, use_container_width=True)
+
+        # Store the results in session state
+        portfolio_df = pd.DataFrame(dynamic_system.portfolio_history)
+
+        # Get trades from all pair models
+        all_trades = dynamic_system.trade_history
+        trades_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
+
+        # Create aggregate performance metrics
+        portfolio_performance = metrics.get('Portfolio Metrics', {})
+
+        st.session_state['backtest_results'] = {
+            'equity_curve': portfolio_df.set_index('date')[
+                'portfolio_value'] if 'date' in portfolio_df.columns else None,
+            'metrics': {
+                'Total Return': portfolio_performance.get('Total Return (%)', 0),
+                'Annual Return': portfolio_performance.get('Annual Return (%)', 0),
+                'Annual Volatility': portfolio_performance.get('Annual Volatility (%)', 0),
+                'Sharpe Ratio': portfolio_performance.get('Sharpe Ratio', 0),
+                'Max Drawdown': portfolio_performance.get('Max Drawdown (%)', 0),
+                'Win Rate': metrics.get('Trading Activity', {}).get('Average Win Rate (%)', 0)
+            },
+            'trades': trades_df,
+            'parameters': {
+                'strategy': {'type': 'Dynamic Pairs Trading', 'params': params},
+                'backtest': backtest_params,
+                'pairs': dynamic_system.pairs if hasattr(dynamic_system, 'pairs') else []
+            },
+            'system': dynamic_system  # Store the system for further analysis
+        }
+
+    def _display_pair_analysis_plotly(self, pair_model: PairModel):
+        """Display detailed pair analysis using Plotly."""
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        # Convert history data to DataFrames
+        portfolio_df = pd.DataFrame(pair_model.portfolio_history)
+        portfolio_df.set_index('date', inplace=True)
+
+        spread_df = pd.DataFrame(pair_model.spread_history)
+        spread_df.set_index('date', inplace=True)
+
+        # Create subplot figure
+        fig = make_subplots(
+            rows=3, cols=1,
+            subplot_titles=(
+                f'Price Series: {pair_model.symbol_x} vs {pair_model.symbol_y}',
+                'Pair Model Equity Curve',
+                'Spread with Bands'
+            ),
+            vertical_spacing=0.1,
+            shared_xaxes=True,
+            row_heights=[0.4, 0.3, 0.3]
+        )
+
+        # 1. Price Series
+        fig.add_trace(
+            go.Scatter(
+                x=pair_model.data.index,
+                y=pair_model.data[pair_model.symbol_x],
+                name=pair_model.symbol_x,
+                line=dict(color='blue')
+            ),
+            row=1, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=pair_model.data.index,
+                y=pair_model.data[pair_model.symbol_y],
+                name=pair_model.symbol_y,
+                line=dict(color='red')
+            ),
+            row=1, col=1
+        )
+
+        # Add normalized prices on the same chart
+        normalized_x = pair_model.data[pair_model.symbol_x] / pair_model.data[pair_model.symbol_x].iloc[0]
+        normalized_y = pair_model.data[pair_model.symbol_y] / pair_model.data[pair_model.symbol_y].iloc[0]
+
+        fig.add_trace(
+            go.Scatter(
+                x=pair_model.data.index,
+                y=normalized_x,
+                name=f"{pair_model.symbol_x} (Norm)",
+                line=dict(color='lightblue', dash='dash')
+            ),
+            row=1, col=1
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=pair_model.data.index,
+                y=normalized_y,
+                name=f"{pair_model.symbol_y} (Norm)",
+                line=dict(color='lightcoral', dash='dash')
+            ),
+            row=1, col=1
+        )
+
+        # 2. Equity Curve
+        fig.add_trace(
+            go.Scatter(
+                x=portfolio_df.index,
+                y=portfolio_df['portfolio_value'],
+                name='Portfolio Value',
+                line=dict(color='green')
+            ),
+            row=2, col=1
+        )
+
+        # Add cash component
+        fig.add_trace(
+            go.Scatter(
+                x=portfolio_df.index,
+                y=portfolio_df['cash'],
+                name='Cash',
+                line=dict(color='lightgreen', dash='dot')
+            ),
+            row=2, col=1
+        )
+
+        # 3. Spread with Bands
+        if not spread_df.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=spread_df.index,
+                    y=spread_df['spread'],
+                    name='Spread',
+                    line=dict(color='purple')
+                ),
+                row=3, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=spread_df.index,
+                    y=spread_df['upper_band'],
+                    name='Upper Band',
+                    line=dict(color='gray', dash='dash')
+                ),
+                row=3, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=spread_df.index,
+                    y=spread_df['lower_band'],
+                    name='Lower Band',
+                    line=dict(color='gray', dash='dash')
+                ),
+                row=3, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    x=spread_df.index,
+                    y=spread_df['mean'],
+                    name='Mean',
+                    line=dict(color='black', dash='dot')
+                ),
+                row=3, col=1
+            )
+
+        # Add trade markers if available
+        if pair_model.trade_history:
+            trade_df = pd.DataFrame(pair_model.trade_history)
+
+            # Add trade markers on price chart
+            for _, trade in trade_df.iterrows():
+                marker_color = 'green' if trade['type'] == 'buy' else 'red'
+                marker_symbol = 'triangle-up' if trade['type'] == 'buy' else 'triangle-down'
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=[trade['date']],
+                        y=[trade['price']],
+                        mode='markers',
+                        marker=dict(
+                            symbol=marker_symbol,
+                            color=marker_color,
+                            size=10
+                        ),
+                        name=f"{trade['type']} {trade['symbol']}",
+                        showlegend=False
+                    ),
+                    row=1, col=1
+                )
+
+        # Update layout
+        fig.update_layout(
+            height=900,
+            width=900,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
+        )
+
+        # Display the figure
+        st.plotly_chart(fig)
+
     def _run_backtest(self,
                       strategy_type: Dict,
                       risk_params: Dict,
@@ -2221,6 +3161,14 @@ class EnhancedStrategyBuilder:
                 if strategy_type['type'] == "Multi-Pair Statistical":
                     # For Multi-Pair Statistical strategy, use the integrated code from paste.txt
                     self._run_multi_pair_backtest(
+                        prices=prices,
+                        pairs=pairs,
+                        params=strategy_type['params'],
+                        backtest_params=backtest_params
+                    )
+                elif strategy_type['type'] == "Dynamic Pairs Trading":
+                    # For Dynamic Pairs Trading, use the new implementation
+                    self._run_dynamic_pairs_backtest(
                         prices=prices,
                         pairs=pairs,
                         params=strategy_type['params'],
