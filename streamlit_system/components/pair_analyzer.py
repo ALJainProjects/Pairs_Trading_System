@@ -59,6 +59,16 @@ class EnhancedPairAnalyzer:
             "Selected Pairs"
         ])
 
+        with st.expander("About Denoising Methods", expanded=False):
+            st.markdown("""
+            **Denoising Methods:**
+            - **None**: Uses raw returns without denoising
+            - **Wavelet**: Uses wavelet transform to remove high-frequency noise while preserving significant trends
+            - **PCA**: Uses Principal Component Analysis to reconstruct data using only principal components, removing minor variations
+
+            Denoising can help identify more stable relationships between assets by reducing market noise.
+            """)
+
         with tab1:
             self._render_correlation_analysis()
 
@@ -105,14 +115,29 @@ class EnhancedPairAnalyzer:
                 max_value=756,
                 value=63
             )
+            denoising_method = st.selectbox(
+                "Denoising Method",
+                ["None", "Wavelet", "PCA"],
+                help="Select a method to reduce noise in return data before analysis"
+            )
+            st.session_state['denoising_method_correlation'] = denoising_method
 
         if st.button("Run Correlation Analysis"):
             try:
                 status_text.text("Calculating returns...")
                 progress_bar.progress(10)
 
-                full_returns = self._calculate_returns(st.session_state['historical_data'])
+                method = None
+                if denoising_method == "Wavelet":
+                    method = "wavelet"
+                    status_text.text("Calculating and denoising returns with Wavelet method...")
+                elif denoising_method == "PCA":
+                    method = "pca"
+                    status_text.text("Calculating and denoising returns with PCA method...")
+                else:
+                    status_text.text("Calculating returns...")
 
+                full_returns = self._calculate_returns(st.session_state['historical_data'], method=method)
                 lookback_returns = full_returns.tail(lookback).copy()
 
                 status_text.text("Initializing correlation analyzer...")
@@ -302,6 +327,12 @@ class EnhancedPairAnalyzer:
                 max_value=1008,
                 value=504
             )
+            denoising_method = st.selectbox(
+                "Denoising Method",
+                ["None", "Wavelet", "PCA"],
+                help="Select a method to reduce noise in return data before analysis"
+            )
+            st.session_state['denoising_method_cointegration'] = denoising_method
 
         if st.button("Run Cointegration Analysis"):
             progress_bar = st.progress(0)
@@ -310,8 +341,24 @@ class EnhancedPairAnalyzer:
             try:
                 status_text.text("Preparing price data...")
                 progress_bar.progress(10)
+
+                method = None
+                if denoising_method == "Wavelet":
+                    method = "wavelet"
+                    status_text.text("Preparing and denoising price data with Wavelet method...")
+                elif denoising_method == "PCA":
+                    method = "pca"
+                    status_text.text("Preparing and denoising price data with PCA method...")
+                else:
+                    status_text.text("Preparing price data...")
+
                 prices = self._get_price_data(st.session_state['historical_data'])
                 prices = prices.ffill().bfill()
+
+                # Add denoising for returns if needed for derived features
+                if method:
+                    returns = self._calculate_returns(st.session_state['historical_data'], method=method)
+                    st.session_state['returns_denoised'] = returns
 
                 status_text.text("Initializing cointegration analysis...")
                 progress_bar.progress(20)
@@ -374,6 +421,12 @@ class EnhancedPairAnalyzer:
                 max_value=10,
                 value=2
             )
+            denoising_method = st.selectbox(
+                "Denoising Method",
+                ["None", "Wavelet", "PCA"],
+                help="Select a method to reduce noise in return data before clustering"
+            )
+            st.session_state['denoising_method_clustering'] = denoising_method
 
         if st.button("Run Clustering Analysis"):
             progress_bar = st.progress(0)
@@ -382,7 +435,18 @@ class EnhancedPairAnalyzer:
             try:
                 status_text.text("Preparing return data...")
                 progress_bar.progress(10)
-                returns = self._calculate_returns(st.session_state['historical_data'])
+                # Update inside the "Run Clustering Analysis" button handler
+                method = None
+                if denoising_method == "Wavelet":
+                    method = "wavelet"
+                    status_text.text("Preparing and denoising returns with Wavelet method...")
+                elif denoising_method == "PCA":
+                    method = "pca"
+                    status_text.text("Preparing and denoising returns with PCA method...")
+                else:
+                    status_text.text("Preparing return data...")
+
+                returns = self._calculate_returns(st.session_state['historical_data'], method=method)
                 returns = returns.ffill().bfill()
                 returns = returns.dropna()
 
