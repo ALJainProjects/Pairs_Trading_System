@@ -1,14 +1,18 @@
 import time
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta, time as dt_time
 import threading
 from typing import Optional, List
 from queue import Queue
 import pytz
 from pathlib import Path
-from config.settings import PROCESSED_DATA_DIR
+
+# Removed PROCESSED_DATA_DIR as we will rely on DB for storage
+from config.settings import REALTIME_DATABASE_URL, DATABASE_URL # Import both URLs
 from config.logging_config import logger
+# Import both database managers
+from src.data.database import RealtimeDatabaseManager, HistoricalDatabaseManager
 
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', None)
@@ -16,7 +20,8 @@ pd.set_option('display.expand_frame_repr', False)
 pd.set_option('max_colwidth', None)
 
 class LiveDataHandler:
-    """LiveDataHandler that maintains separate files for each ticker."""
+    """LiveDataHandler that fetches live data, stores it in a real-time database,
+    and archives historical portions to a separate historical database."""
 
     VALID_INTERVALS = ['1m', '2m', '5m', '15m', '30m', '60m', '90m']
     MAX_RETRIES = 3
@@ -25,9 +30,8 @@ class LiveDataHandler:
                  tickers: List[str],
                  update_interval: int = 60,
                  data_interval: str = '1m',
-                 max_stored_rows: int = 5000,
-                 archive_data: bool = True,
-                 archive_threshold: int = None):
+                 archive_hour_utc: int = 4, # e.g., 4 AM UTC, often after major market closes
+                 archive_minute_utc: int = 0):
         """
         Initialize the LiveDataHandler.
 
@@ -35,8 +39,8 @@ class LiveDataHandler:
             tickers: List of ticker symbols
             update_interval: Seconds between updates
             data_interval: Data granularity ('1m', '5m', etc.)
-            max_stored_rows: Maximum rows to keep in memory
-            archive_data: Whether to archive old data
+            archive_hour_utc: Hour (UTC) at which to attempt daily archiving.
+            archive_minute_utc: Minute (UTC) at which to attempt daily archiving.
         """
         if data_interval not in self.VALID_INTERVALS:
             raise ValueError(f"Invalid interval. Must be one of {self.VALID_INTERVALS}")
@@ -44,38 +48,32 @@ class LiveDataHandler:
         self.tickers = tickers
         self.update_interval = max(update_interval, 60)
         self.data_interval = data_interval
-        self.max_stored_rows = max_stored_rows
-        self.archive_data = archive_data
-        self.archive_threshold = archive_threshold or (max_stored_rows * 2)
 
         self._stop_event = threading.Event()
         self._data_lock = threading.Lock()
-        self._archive_lock = threading.Lock()
-
-        self.live_data = {ticker: pd.DataFrame() for ticker in tickers}
+        self._archive_lock = threading.Lock() # New lock for archiving
         self._error_queue = Queue()
 
-        self._setup_directories()
+        self.realtime_db_manager = RealtimeDatabaseManager(db_uri=REALTIME_DATABASE_URL)
+        self.historical_db_manager = HistoricalDatabaseManager(db_uri=DATABASE_URL) # Initialize Historical DB Manager
+
+        self.archive_time_utc = dt_time(archive_hour_utc, archive_minute_utc, tzinfo=pytz.UTC)
+        self.last_archive_date = None # Track last successful archive date (UTC) for daily trigger
+
         logger.info(
             f"Initialized LiveDataHandler for {len(tickers)} tickers "
-            f"with {data_interval} interval"
+            f"with {data_interval} interval. Real-time data to '{REALTIME_DATABASE_URL.split('///')[-1]}', "
+            f"historical archive to '{DATABASE_URL.split('///')[-1]}'."
         )
-
-    def _setup_directories(self) -> None:
-        """Setup necessary directories."""
-        self.live_data_dir = Path(PROCESSED_DATA_DIR.replace(r'\config', '')) / "live_data"
-        self.archive_dir = self.live_data_dir / "archive"
-
-        for directory in [self.live_data_dir, self.archive_dir]:
-            directory.mkdir(parents=True, exist_ok=True)
 
     def fetch_live_data(self, ticker: str) -> Optional[pd.DataFrame]:
         """Fetch latest live data with improved verification."""
         for attempt in range(self.MAX_RETRIES):
             try:
+                # yfinance returns UTC aware datetime if tz=None and data.index is localized
                 data = yf.download(
                     tickers=ticker,
-                    period='1d',
+                    period='1d', # Fetch enough data to potentially get new bars
                     interval=self.data_interval,
                     progress=False,
                     prepost=True
@@ -88,26 +86,28 @@ class LiveDataHandler:
                     data.columns = data.columns.get_level_values(0)
 
                 data['Symbol'] = ticker
-                fetch_time = datetime.now(pytz.UTC)
+                fetch_time = datetime.now(pytz.UTC) # Capture fetch time in UTC
                 data['fetch_time'] = fetch_time
 
                 data.index = pd.to_datetime(data.index)
                 if data.index.tz is None:
+                    # If yfinance returned naive, assume UTC as per standard practice for market data
                     data.index = data.index.tz_localize('UTC')
                 else:
                     data.index = data.index.tz_convert('UTC')
 
                 data = data.reset_index()
+                # Rename 'index' or 'Datetime' to 'Date' to match our standardized format
                 data.rename(columns={'index': 'Date', 'Datetime': 'Date'}, inplace=True)
 
-                if len(data) > 0:
-                    latest_time = data['Date'].max()
-                    current_time = pd.Timestamp.now(tz='UTC')
-                    time_diff = current_time - latest_time
-                    print(f"\n{ticker} latest data time: {latest_time}")
-                    print(f"Time difference from now: {time_diff}")
 
-                data = data[['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume', 'fetch_time']]
+                # Ensure required columns are present and in order
+                required_cols = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Volume', 'fetch_time']
+                for col in required_cols:
+                    if col not in data.columns:
+                        data[col] = pd.NA # Use pandas NA for missing values
+
+                data = data[required_cols]
 
                 return data
 
@@ -125,107 +125,131 @@ class LiveDataHandler:
                     )
                     return None
 
+    def _perform_daily_archive(self) -> None:
+        """
+        Archives data from the real-time database to the historical database for the previous day.
+        This method should be called once per day, typically after market close or at a specific UTC time.
+        """
+        with self._archive_lock:
+            now_utc = datetime.now(pytz.UTC)
+            today_utc_date = now_utc.date()
+
+            # Determine the date to archive (the day *before* the current archive attempt)
+            # If current time is past archive_time_utc, we archive yesterday's data.
+            # If it's before, we might still be in yesterday for archiving purposes if the
+            # last archive was two days ago (e.g. if script was off).
+            archive_candidate_date = None
+            if now_utc.time() >= self.archive_time_utc:
+                archive_candidate_date = today_utc_date # Archive "today's" completed data (which means data from yesterday's trading session)
+            else:
+                archive_candidate_date = today_utc_date - timedelta(days=1) # Archive "yesterday's" data
+
+            # Check if we already archived this date
+            if self.last_archive_date == archive_candidate_date:
+                logger.debug(f"Data for {archive_candidate_date} already archived. Skipping.")
+                return
+
+            # Define start and end datetimes for the data to be archived (the whole previous day)
+            # We want data from `archive_candidate_date` (UTC start of day) to `archive_candidate_date` (UTC end of day)
+            start_dt_to_archive = datetime.combine(archive_candidate_date, dt_time.min).replace(tzinfo=pytz.UTC)
+            end_dt_to_archive = datetime.combine(archive_candidate_date, dt_time.max).replace(tzinfo=pytz.UTC)
+
+
+            logger.info(f"Attempting to archive data for {archive_candidate_date} (UTC) from real-time DB to historical DB...")
+
+            archived_any_data = False
+            for ticker in self.tickers:
+                try:
+                    # Fetch all data for the specific day from the real-time database
+                    daily_realtime_data = self.realtime_db_manager.fetch_realtime_data(
+                        ticker=ticker,
+                        start_datetime=start_dt_to_archive.strftime('%Y-%m-%d %H:%M:%S'),
+                        end_datetime=end_dt_to_archive.strftime('%Y-%m-%d %H:%M:%S')
+                    )
+
+                    if not daily_realtime_data.empty:
+                        # Prepare data for historical database upsert
+                        # The historical DB uses 'Date' (Python date object) and 'Adj_Close'
+                        # Real-time DB has 'datetime' and potentially no 'adj_close'
+                        df_to_archive = daily_realtime_data.copy()
+                        df_to_archive.rename(columns={'datetime': 'Date'}, inplace=True)
+
+                        # Convert 'Date' column from datetime (with time) to date only
+                        df_to_archive['Date'] = df_to_archive['Date'].dt.date
+
+                        # Ensure 'Adj_Close' exists. For real-time, often 'Close' is used.
+                        if 'Adj_Close' not in df_to_archive.columns:
+                            df_to_archive['Adj_Close'] = df_to_archive['close']
+
+                        # Group by Symbol and Date, then aggregate to daily bars
+                        # This ensures we get one entry per symbol per day for the historical DB
+                        # It also handles cases where real-time data might have multiple bars for the same date,
+                        # converting them into a single daily bar for historical storage.
+                        # For simplicity, we'll take the last close, first open, etc.
+                        # A more robust aggregation might involve weighted averages or specific rules.
+                        aggregated_daily_data = df_to_archive.groupby(['Symbol', 'Date']).agg(
+                            Open=('Open', 'first'),
+                            High=('High', 'max'),
+                            Low=('Low', 'min'),
+                            Close=('Close', 'last'),
+                            Adj_Close=('Adj_Close', 'last'), # Assuming last Adj_Close is representative
+                            Volume=('Volume', 'sum')
+                        ).reset_index()
+
+
+                        self.historical_db_manager.upsert_historical_data(aggregated_daily_data)
+                        logger.info(f"Archived {len(aggregated_daily_data)} daily records for {ticker} (data from {archive_candidate_date}) to historical DB.")
+                        archived_any_data = True
+
+                        # Optional: Remove archived data from real-time database to keep it lean
+                        # This can be done by fetching IDs of the archived data and then deleting them.
+                        # For simplicity, we'll just log this as a potential step.
+                        # CAUTION: Deleting from a DB can be slow and risky. Only do if necessary.
+                        # E.g., self.realtime_db_manager.delete_data_before_datetime(end_dt_to_archive)
+                        # For now, we won't implement actual deletion, relying on the real-time DB growing.
+
+                    else:
+                        logger.debug(f"No real-time data found for {ticker} on {archive_candidate_date} to archive.")
+
+                except Exception as e:
+                    logger.error(f"Error archiving data for {ticker} for date {archive_candidate_date}: {e}")
+                    self._error_queue.put(f"Archive error for {ticker} on {archive_candidate_date}: {str(e)}")
+
+            if archived_any_data:
+                self.last_archive_date = archive_candidate_date
+                logger.info(f"Successfully completed archiving for {archive_candidate_date}.")
+            else:
+                logger.info(f"No new data was archived for {archive_candidate_date}.")
+
+
     def update_live_data(self) -> None:
-        """Update live data for each ticker independently."""
+        """Update live data for each ticker, storing to the real-time database,
+        and perform daily archiving if needed."""
         logger.info("Starting live data update loop")
 
         while not self._stop_event.is_set():
             try:
-                fetch_time = datetime.now(pytz.UTC)
-
                 for ticker in self.tickers:
                     data = self.fetch_live_data(ticker)
-                    if data is not None:
+                    if data is not None and not data.empty:
                         with self._data_lock:
-                            self._update_ticker_data(ticker, data)
+                            self.realtime_db_manager.upsert_realtime_data(data)
+                            logger.info(f"Upserted {len(data)} rows for {ticker} into real-time DB.")
+                    elif data is not None and data.empty:
+                        logger.warning(f"Fetch for {ticker} returned empty data, nothing to upsert.")
+
+                # Check for daily archiving trigger
+                now_utc = datetime.now(pytz.UTC)
+                if now_utc.time() >= self.archive_time_utc and \
+                   (self.last_archive_date is None or self.last_archive_date < now_utc.date()):
+                    self._perform_daily_archive()
 
                 time.sleep(self.update_interval)
 
             except Exception as e:
-                logger.error(f"Error in update loop: {str(e)}")
+                logger.error(f"Error in live data update loop: {str(e)}")
                 self._error_queue.put(str(e))
                 time.sleep(self.update_interval)
-
-    def _update_ticker_data(self, ticker: str, new_data: pd.DataFrame) -> None:
-        """Update data for a single ticker and save to file with verification."""
-        try:
-            ticker_file = self.live_data_dir / f"{ticker}.csv"
-
-            current_rows = 0
-            if ticker_file.exists():
-                current_data = pd.read_csv(ticker_file)
-                current_rows = len(current_data)
-                print(f"\nBefore update - {ticker} file has {current_rows} rows")
-
-                current_data['Date'] = pd.to_datetime(current_data['Date'])
-                if current_data['Date'].dt.tz is None:
-                    current_data['Date'] = current_data['Date'].dt.tz_localize('UTC')
-                else:
-                    current_data['Date'] = current_data['Date'].dt.tz_convert('UTC')
-            else:
-                current_data = pd.DataFrame()
-                print(f"\nCreating new file for {ticker}")
-
-            print(f"New data rows for {ticker}: {len(new_data)}")
-
-            new_data['Date'] = pd.to_datetime(new_data['Date'])
-
-            if not current_data.empty:
-                latest_current = current_data['Date'].max()
-                new_records = new_data[new_data['Date'] > latest_current]
-                print(f"Number of new records: {len(new_records)}")
-            else:
-                new_records = new_data
-
-            if len(new_records) > 0:
-                updated_data = pd.concat(
-                    [current_data, new_records],
-                    ignore_index=True
-                ).drop_duplicates(
-                    subset=['Date', 'Symbol'],
-                    keep='last'
-                )
-
-                updated_data = updated_data.sort_values('Date')
-
-                if self.archive_data and len(updated_data) >= self.archive_threshold:
-                    self._archive_ticker_data(ticker, updated_data)
-                    updated_data = updated_data.iloc[-self.max_stored_rows:]
-
-                updated_data.to_csv(ticker_file, index=False)
-
-                if ticker_file.exists():
-                    verify_data = pd.read_csv(ticker_file)
-                    print(f"After update - {ticker} file has {len(verify_data)} rows")
-                    print(f"Added {len(verify_data) - current_rows} new rows")
-
-                    self.live_data[ticker] = updated_data.iloc[-self.max_stored_rows:]
-                else:
-                    raise IOError(f"Failed to write data to {ticker_file}")
-            else:
-                print(f"No new data to add for {ticker}")
-
-        except Exception as e:
-            logger.error(f"Error updating {ticker} data: {str(e)}")
-            self._error_queue.put(f"Update error for {ticker}: {str(e)}")
-            raise
-
-    def _archive_ticker_data(self, ticker: str, data: pd.DataFrame) -> None:
-        """Archive old data to disk."""
-        with self._archive_lock:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f"{ticker}_archive_{timestamp}.csv"
-            filepath = self.archive_dir / filename
-
-            try:
-                cutoff_idx = len(data) - self.max_stored_rows
-                archive_data = data.iloc[:cutoff_idx]
-                archive_data.to_csv(filepath, index=False)
-                logger.info(f"Archived {len(archive_data)} rows for {ticker}")
-
-            except Exception as e:
-                logger.error(f"Error archiving {ticker} data: {str(e)}")
-                self._error_queue.put(f"Archive error for {ticker}: {str(e)}")
 
     def start_live_updates(self) -> None:
         """Start the live data update thread."""
@@ -256,33 +280,40 @@ class LiveDataHandler:
 
     def get_latest_data(self, tickers: Optional[List[str]] = None) -> pd.DataFrame:
         """
-        Get latest data for specified tickers.
+        Get latest data for specified tickers from the real-time database.
 
         Args:
-            tickers: List of tickers (None for all)
+            tickers: List of tickers (None for all initialized tickers)
 
         Returns:
             DataFrame of latest data
         """
         tickers = tickers or self.tickers
-        latest_data = []
-
+        all_latest_data = pd.DataFrame()
         for ticker in tickers:
-            ticker_file = self.live_data_dir / f"{ticker}.csv"
-            if ticker_file.exists():
-                try:
-                    data = pd.read_csv(ticker_file)
-                    if not data.empty:
-                        latest = data.iloc[-1:].copy()
-                        latest_data.append(latest)
-                except Exception as e:
-                    logger.error(f"Error reading latest data for {ticker}: {str(e)}")
+            # Fetch the latest bar for each ticker
+            latest_bar_df = self.realtime_db_manager.fetch_realtime_data(ticker=ticker, limit=1)
+            if not latest_bar_df.empty:
+                all_latest_data = pd.concat([all_latest_data, latest_bar_df], ignore_index=True)
 
-        if latest_data:
-            return pd.concat(latest_data, ignore_index=True)
-        else:
-            logger.warning("No live data available")
-            return pd.DataFrame()
+        if all_latest_data.empty:
+            logger.warning("No live data available in the real-time database.")
+        return all_latest_data
+
+    def get_historical_live_data(self, ticker: str, start_datetime: str = None, end_datetime: str = None) -> pd.DataFrame:
+        """
+        Get historical range of live data for a specific ticker from the real-time database.
+
+        Args:
+            ticker (str): The ticker symbol.
+            start_datetime (str, optional): Start datetime in 'YYYY-MM-DD HH:MM:SS' format.
+            end_datetime (str, optional): End datetime in 'YYYY-MM-DD HH:MM:SS' format.
+
+        Returns:
+            pd.DataFrame: DataFrame of live data history.
+        """
+        return self.realtime_db_manager.fetch_realtime_data(ticker=ticker, start_datetime=start_datetime, end_datetime=end_datetime)
+
 
     def get_error_messages(self) -> List[str]:
         """Get any error messages from the update thread."""
@@ -298,25 +329,44 @@ def main():
 
     handler = LiveDataHandler(
         tickers=tickers,
-        update_interval=30,
+        update_interval=60, # Increased update_interval for real-world testing. yfinance has rate limits.
         data_interval='1m',
-        max_stored_rows=5000,
-        archive_data=True
+        archive_hour_utc=1 # Archive shortly after midnight UTC, adjust as needed for specific market close times
     )
 
     try:
         handler.start_live_updates()
         print("Live updates started...", flush=True)
 
-        for i in range(12):
-            time.sleep(10)
-            print(f"\nCheck {i+1}/12:", flush=True)
+        # Run for a longer period to potentially trigger archiving if crossing midnight UTC
+        # For testing, you might need to adjust your system clock or the archive_hour_utc
+        # to ensure the archiving logic is hit within your test run.
+        for i in range(120): # Run for 2 hours (120 * 60 seconds)
+            time.sleep(60) # Wait for one update cycle
+            print(f"\nCheck {i+1}:", flush=True)
 
-            for ticker in tickers:
-                file_path = handler.live_data_dir / f"{ticker}.csv"
-                if file_path.exists():
-                    data = pd.read_csv(file_path)
-                    print(f"{ticker} file size: {len(data)} rows", flush=True)
+            latest_data = handler.get_latest_data()
+            if not latest_data.empty:
+                print("Latest fetched data (from real-time DB):", flush=True)
+                print(latest_data[['symbol', 'datetime', 'close', 'volume']], flush=True)
+            else:
+                print("No latest data available yet in real-time DB.", flush=True)
+
+            # Example of fetching historical real-time data
+            if i % 10 == 0 and i > 0: # Check history every 10 minutes
+                print("\nFetching historical 1-minute data for AAPL from real-time DB (last 10 min):", flush=True)
+                end_dt_str = datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S')
+                start_dt_str = (datetime.now(pytz.UTC) - timedelta(minutes=10)).strftime('%Y-%m-%d %H:%M:%S')
+                aapl_live_history = handler.get_historical_live_data(
+                    ticker='AAPL',
+                    start_datetime=start_dt_str,
+                    end_datetime=end_dt_str
+                )
+                if not aapl_live_history.empty:
+                    print(aapl_live_history[['symbol', 'datetime', 'close', 'volume', 'fetch_time']], flush=True)
+                else:
+                    print("No recent historical live data for AAPL yet in real-time DB.", flush=True)
+
 
     except KeyboardInterrupt:
         print("\nReceived interrupt signal", flush=True)

@@ -20,8 +20,14 @@ os.makedirs(RAW_DATA_DIR, exist_ok=True)
 os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
 # --- Database Configuration ---
-# Default to a local SQLite DB, but can be overridden by an environment variable
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'pair_trading.db'}")
+# Default to a local SQLite DB for historical data
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'pair_trading_historical.db'}")
+
+# New: Dedicated URL for real-time data database
+# Could be a different file, or even an in-memory database for very short-term storage
+# For simplicity, let's use another SQLite file for now.
+REALTIME_DATABASE_URL = os.getenv("REALTIME_DATABASE_URL", f"sqlite:///{BASE_DIR / 'pair_trading_realtime.db'}")
+
 
 # --- Logging Directory ---
 LOG_DIR = BASE_DIR / "logs"
@@ -37,6 +43,7 @@ os.makedirs(OPTIMIZATION_DIR, exist_ok=True)
 # --- Broker API Configuration (for paper/live trading) ---
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY") # Added Polygon Key
 IS_PAPER_TRADING = os.getenv("IS_PAPER_TRADING", "True").lower() in ('true', '1', 't')
 
 # --- Quant Research Settings ---
