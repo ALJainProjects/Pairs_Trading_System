@@ -1,729 +1,159 @@
-"""
-Deep Learning Models Module
-
-Features:
- - LSTM for time-series forecasting
- - Dense model for classification
- - Model checkpointing and state management
- - Plotly-based visualizations
- - Comprehensive evaluation metrics
-"""
-
-
-import os
-from pathlib import Path
-# import sys
-from typing import Tuple, Dict, List, Optional, Union
-import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import warnings
+import numpy as np
+from typing import Tuple, List
 
-from keras import Model, Layer
-from keras.src.activations import softmax, tanh
-from keras.src.layers import Multiply, dot, BatchNormalization
-from tensorflow import reduce_sum
-from tensorflow.python.keras.callbacks import ReduceLROnPlateau, TensorBoard
-
-from src.data import FeatureEngineer
+from .base_model import BaseModel
+from config.logging_config import logger
 
 try:
     import tensorflow as tf
-    from tensorflow.keras.models import Sequential, load_model
-    from tensorflow.keras.layers import Dense, Dropout, LSTM
+    from tensorflow.keras.models import Model
+    from tensorflow.keras.layers import (
+        Input, Dense, Dropout, Layer, Conv1D, SpatialDropout1D, add,
+        Activation, LayerNormalization, Conv2D, MaxPooling2D, Concatenate
+    )
     from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
     from tensorflow.keras.optimizers import Adam
-    from tensorflow.keras.layers import Input
 except ImportError:
-    raise ImportError("Please install tensorflow: pip install tensorflow")
+    raise ImportError("TensorFlow is not installed. Please run 'pip install tensorflow'.")
 
-try:
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import mean_squared_error, classification_report, confusion_matrix
-    from sklearn.model_selection import train_test_split
-    from sklearn.model_selection import TimeSeriesSplit
-except ImportError:
-    raise ImportError("Please install scikit-learn: pip install scikit-learn")
-
-from config.logging_config import logger
-from config.settings import MODEL_DIR
-
-
-class TemporalAttention(Layer):
-    """Temporal attention mechanism adapted for financial time series."""
-
-    def __init__(self, return_sequences=False, **kwargs):
-        self.return_sequences = return_sequences
-        super().__init__(**kwargs)
-
-    def build(self, input_shape):
-        self.W = self.add_weight(
-            name="attention_weight",
-            shape=(input_shape[-1], 1),
-            initializer="glorot_uniform",
-            trainable=True
-        )
-        self.b = self.add_weight(
-            name="attention_bias",
-            shape=(input_shape[1], 1),
-            initializer="zeros",
-            trainable=True
-        )
-        super().build(input_shape)
+class TCNResidualBlock(Layer):
+    def __init__(self, n_filters, kernel_size, dilation_rate, **kwargs):
+        super(TCNResidualBlock, self).__init__(**kwargs)
+        self.n_filters = n_filters
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.conv1 = Conv1D(filters=n_filters, kernel_size=kernel_size,
+                            dilation_rate=dilation_rate, padding='causal', activation='relu')
+        self.dropout1 = SpatialDropout1D(0.2)
+        self.conv2 = Conv1D(filters=n_filters, kernel_size=kernel_size,
+                            dilation_rate=dilation_rate, padding='causal', activation='relu')
+        self.dropout2 = SpatialDropout1D(0.2)
+        self.downsample = Conv1D(filters=n_filters, kernel_size=1, padding='same')
+        self.add = add
+        self.activation = Activation('relu')
 
     def call(self, inputs):
-        e = tanh(dot(inputs, self.W) + self.b)
-        a = softmax(e, axis=1)
+        x, residual = inputs
+        x = self.conv1(x)
+        x = self.dropout1(x)
+        x = self.conv2(x)
+        x = self.dropout2(x)
+        if residual.shape[-1] != x.shape[-1]:
+            residual = self.downsample(residual)
+        return self.activation(self.add([x, residual]))
 
-        weighted_input = Multiply()([inputs, a])
-
-        if self.return_sequences:
-            return weighted_input
-
-        return reduce_sum(weighted_input, axis=1)
-
-
-class DeepLearningModel:
-    """Deep Learning Model with LSTM and Dense architectures for financial time series."""
-
-    def __init__(self):
-        """
-        Initialize the model with optional model directory for checkpoints.
-        """
-        self.feature_scaler = StandardScaler()
-        self.target_scaler = StandardScaler()
-        self.model_dir = MODEL_DIR
-        if self.model_dir:
-            os.makedirs(self.model_dir, exist_ok=True)
-        self._history = None
-        self._current_model = None
-        self.is_fitted = False
-
-    def save_model(self, filename: str) -> None:
-        """Save the current model."""
-        if not self._current_model:
-            raise ValueError("No model to save")
-        save_path = self.model_dir / filename if self.model_dir else filename
-        self._current_model.save(save_path)
-        logger.info(f"Model saved to {save_path}")
-
-    def load_model(self, filename: str) -> None:
-        """Load a saved model."""
-        load_path = self.model_dir / filename if self.model_dir else filename
-        if not os.path.exists(load_path):
-            raise FileNotFoundError(f"Model file not found: {load_path}")
-        self._current_model = load_model(load_path)
-        logger.info(f"Model loaded from {load_path}")
-
-    def prepare_sequences(
-            self,
-            data: pd.DataFrame,
-            target_column: str,
-            feature_columns: Optional[List[str]] = None,
-            sequence_length: int = 10,
-            stride: int = 1,
-            scale_data: bool = True
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Prepare sequences for LSTM with separate scaling for features and target.
-
-        Args:
-            data: Input DataFrame
-            target_column: Column to predict
-            feature_columns: Columns to use as features
-            sequence_length: Length of input sequences
-            stride: Steps between sequences
-            scale_data: Whether to scale the data
-
-        Returns:
-            Tuple of (X, y) arrays
-        """
-        logger.info("Preparing sequences for LSTM with target scaling")
-
-        if data.isnull().any().any():
-            raise ValueError("Data contains NaN values")
-        if target_column not in data.columns:
-            raise ValueError(f"Target column '{target_column}' not found")
-
-        target_values = data[[target_column]].values
-        if scale_data:
-            target_values = self.target_scaler.fit_transform(target_values)
-
-        feature_columns = feature_columns or [target_column]
-        features_df = data[feature_columns]
-
-        if scale_data:
-            features_df = pd.DataFrame(
-                self.feature_scaler.fit_transform(features_df),
-                columns=features_df.columns,
-                index=features_df.index
-            )
-            self.is_fitted = True
-
-        sequences, targets = [], []
-        for i in range(0, len(data) - sequence_length, stride):
-            seq = features_df.iloc[i:i + sequence_length].values
-            target = target_values[i + sequence_length][0]
-            sequences.append(seq)
-            targets.append(target)
-
-        X = np.array(sequences)
-        y = np.array(targets)
-
-        logger.debug(f"Created sequences with shape {X.shape} and targets {y.shape}")
-        return X, y
-
-    def build_lstm_model(
-            self,
-            input_shape: Tuple[int, int],
-            lstm_units: List[int] = (50, 50),
-            dense_units: List[int] = (32,),
-            dropout_rate: float = 0.2,
-            learning_rate: float = 0.001
-    ) -> Sequential:
-        """
-        Build LSTM model with temporal attention for pairs trading.
-
-        Args:
-            input_shape: Shape of input sequences (sequence_length, features)
-            lstm_units: List of units for LSTM layers
-            dense_units: List of units for Dense layers
-            dropout_rate: Dropout rate
-            learning_rate: Learning rate for optimizer
-        """
-        logger.info("Building LSTM model with temporal attention")
-
+class TCNModel(BaseModel):
+    def build_model(self, input_shape: Tuple, n_filters=64, kernel_size=3, stack_size=2):
         inputs = Input(shape=input_shape)
-        x = BatchNormalization(name='input_normalization')(inputs)
-
-        for i, units in enumerate(lstm_units):
-            lstm_out = LSTM(
-                units,
-                return_sequences=True,
-                activation='tanh'
-            )(x)
-
-            x = BatchNormalization(name=f'batch_norm_lstm_{i}')(lstm_out)
-
-            x = Dropout(dropout_rate, name=f'dropout_lstm_{i}')(x)
-
-            attention = TemporalAttention(
-                return_sequences=(i < len(lstm_units) - 1),
-                name=f'temporal_attention_{i}'
-            )(x)
-
-            x = attention
-
-        for i, units in enumerate(dense_units):
-            x = Dense(units, activation='relu')(x)
-
-            x = BatchNormalization(name=f'batch_norm_dense_{i}')(x)
-
-            x = Dropout(dropout_rate, name=f'dropout_dense_{i}')(x)
-
-        outputs = Dense(1, activation='linear', name='output')(x)
-
+        x = inputs
+        for i in range(stack_size):
+            for d in [1, 2, 4, 8]:
+                x = TCNResidualBlock(n_filters, kernel_size, d)([x, x])
+        x = Dense(32, activation='relu')(x[:, -1, :])
+        outputs = Dense(1)(x)
         model = Model(inputs=inputs, outputs=outputs)
-        model.compile(
-            optimizer=Adam(learning_rate=learning_rate, clipnorm=1.0),
-            loss='mean_squared_error',
-            metrics=['mae']
-        )
+        model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
+        self.model = model
 
-        self._current_model = model
-        return model
-
-    def build_dense_model(
-        self,
-        input_dim: int,
-        units: List[int] = (64, 32),
-        dropout_rate: float = 0.3,
-        learning_rate: float = 0.001
-    ) -> Sequential:
-        """Build Dense model for classification."""
-        logger.info("Building Dense classification model")
-
-        model = Sequential()
-        model.add(Input(shape=(input_dim,)))
-        model.add(Dense(units[0], activation='relu'))
-        model.add(Dropout(dropout_rate))
-
-        for n_units in units[1:]:
-            model.add(Dense(n_units, activation='relu'))
-            model.add(Dropout(dropout_rate))
-
-        model.add(Dense(1, activation='sigmoid'))
-
-        model.compile(
-            optimizer=Adam(learning_rate=learning_rate, clipnorm=1.0),
-            loss='binary_crossentropy',
-            metrics=['accuracy']
-        )
-
-        self._current_model = model
-        return model
-
-    def train_model(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
-        epochs: int = 1000,
-        batch_size: int = 32,
-        patience: int = 50,
-        model_prefix: str = "model",
-        class_weights: Optional[Dict] = None
-    ) -> Sequential:
-        """
-        Train model with early stopping and checkpoints.
-
-        Args:
-            X_train: Training features
-            y_train: Training targets
-            X_val: Validation features
-            y_val: Validation targets
-            epochs: Number of epochs
-            batch_size: Batch size
-            patience: Early stopping patience
-            model_prefix: Prefix for saved model files
-        """
-        if self._current_model is None:
-            raise ValueError("Build model first using build_lstm_model")
-
+    def train(self, X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray, y_val: np.ndarray, epochs: int, batch_size: int):
+        if self.model is None:
+            raise RuntimeError("Model must be built before training.")
+        logger.info(f"Training {self.model_name} for {epochs} epochs...")
         callbacks = [
-            EarlyStopping(
-                monitor='val_loss',
-                patience=patience,
-                restore_best_weights=True,
-                verbose=1
-            ),
-            ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=patience // 2,
-                min_lr=1e-6,
-                verbose=1
-            ),
-            TensorBoard(
-                log_dir=f'{self.model_dir}/logs/{model_prefix}',
-                histogram_freq=1
-            )
+            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
+            ModelCheckpoint(filepath=self.model_path / "best_model.keras", save_best_only=True, monitor='val_loss')
         ]
+        self.model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=1)
+        self.is_fitted = True
+        logger.info("Training complete.")
 
-        if self.model_dir:
-            callbacks.append(
-                ModelCheckpoint(
-                    filepath=Path(self.model_dir) / f"{model_prefix}_{{epoch:02d}}_{{val_loss:.4f}}.h5",
-                    monitor='val_loss',
-                    save_best_only=True,
-                    verbose=1
-                )
-            )
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise RuntimeError("Model must be trained before prediction.")
+        return self.model.predict(X)
 
-        history = self._current_model.fit(
-            X_train, y_train,
-            validation_data=(X_val, y_val),
-            epochs=epochs,
-            batch_size=batch_size,
-            callbacks=callbacks,
-            class_weight=class_weights,
-            shuffle=False,
-            verbose=1
-        )
-
-        self._history = history
-        logger.info("Model training completed")
-        return self._current_model
-
-    def evaluate_model(
-        self,
-        X_test: np.ndarray,
-        y_test: np.ndarray,
-        task: str = 'regression'
-    ) -> Dict:
-        """
-        Evaluate model performance.
-
-        Args:
-            X_test: Test features
-            y_test: Test targets
-            task: 'regression' or 'classification'
-
-        Returns:
-            Dictionary of evaluation metrics
-        """
-        if self._current_model is None:
-            raise ValueError("No model available for evaluation")
-
-        if task == 'regression':
-            preds = self._current_model.predict(X_test)
-            mse = mean_squared_error(y_test, preds)
-            rmse = np.sqrt(mse)
-            mae = np.mean(np.abs(y_test - preds.flatten()))
-            r2 = 1 - (np.sum((y_test - preds.flatten())**2) /
-                     np.sum((y_test - np.mean(y_test))**2))
-
-            return {
-                "mse": mse,
-                "rmse": rmse,
-                "mae": mae,
-                "r2": r2
-            }
-
-        elif task == 'classification':
-            preds = (self._current_model.predict(X_test) > 0.5).astype(int)
-            return {
-                "classification_report": classification_report(y_test, preds, output_dict=True),
-                "confusion_matrix": confusion_matrix(y_test, preds).tolist()
-            }
-
-        else:
-            raise ValueError(f"Unknown task type: {task}")
-
-    def predict(
-            self,
-            X: np.ndarray,
-            return_confidence: bool = True
-    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict[str, np.ndarray]]]:
-        """
-        Make predictions with confidence estimates and attention weights.
-
-        Args:
-            X: Input features
-            return_confidence: Whether to return confidence estimates
-
-        Returns:
-            Either predictions only or tuple of (predictions, confidence_info)
-        """
-        if self._current_model is None:
-            raise ValueError("No model available for prediction")
-
-        predictions = self._current_model.predict(X)
-
-        if not return_confidence:
-            return predictions
-
-        confidence_info = {}
-
-        if any(isinstance(layer, Dropout) for layer in self._current_model.layers):
-            MC_SAMPLES = 30
-            mc_predictions = np.array([
-                self._current_model(X, training=True)
-                for _ in range(MC_SAMPLES)
-            ])
-            confidence_info['model_uncertainty'] = np.std(mc_predictions, axis=0)
-            confidence_info['prediction_mean'] = np.mean(mc_predictions, axis=0)
-
-        if any('attention' in layer.name for layer in self._current_model.layers):
-            attention_layers = [layer for layer in self._current_model.layers
-                                if isinstance(layer, TemporalAttention)]
-
-            if attention_layers:
-                attention_model = Model(
-                    inputs=self._current_model.input,
-                    outputs=[layer.output for layer in attention_layers]
-                )
-                attention_weights = attention_model.predict(X)
-
-                if isinstance(attention_weights, list):
-                    confidence_info['attention_weights'] = {
-                        f'layer_{i}': weights
-                        for i, weights in enumerate(attention_weights)
-                    }
-                else:
-                    confidence_info['attention_weights'] = attention_weights
-
-        if 'attention_weights' in confidence_info:
-            avg_attention = np.mean(
-                list(confidence_info['attention_weights'].values())
-                if isinstance(confidence_info['attention_weights'], dict)
-                else confidence_info['attention_weights'],
-                axis=0
-            )
-            confidence_info['feature_importance'] = avg_attention
-
-        return predictions, confidence_info
-
-    def plot_training_history(
-        self,
-        metrics: Union[str, List[str]] = ('loss', 'mae'),
-        title: str = 'Training History',
-        save_path: Optional[str] = None
-    ) -> None:
-        """
-        Plot training history with multiple metrics support.
-
-        Args:
-            metrics: Metric(s) to plot
-            title: Plot title
-            save_path: Path to save the plot
-        """
-        if not self._history:
-            logger.warning("No training history available")
-            return
-
-        metrics = [metrics] if isinstance(metrics, str) else metrics
-        fig = go.Figure()
-
-        for metric in metrics:
-            if metric not in self._history.history:
-                logger.warning(f"Metric {metric} not found in history")
-                continue
-
-            fig.add_trace(go.Scatter(
-                x=list(range(len(self._history.history[metric]))),
-                y=self._history.history[metric],
-                mode='lines',
-                name=f'Training {metric}'
-            ))
-
-            val_metric = f'val_{metric}'
-            if val_metric in self._history.history:
-                fig.add_trace(go.Scatter(
-                    x=list(range(len(self._history.history[val_metric]))),
-                    y=self._history.history[val_metric],
-                    mode='lines',
-                    name=f'Validation {metric}'
-                ))
-
-        fig.update_layout(
-            title=title,
-            xaxis_title='Epoch',
-            yaxis_title='Value',
-            template='plotly_white',
-            hovermode='x unified'
-        )
-
-        if save_path:
-            fig.write_html(save_path)
-
-        fig.show()
+    @staticmethod
+    def create_sequences(features: pd.DataFrame, target: pd.Series, sequence_length: int) -> Tuple[np.ndarray, np.ndarray]:
+        X, y = [], []
+        for i in range(len(features) - sequence_length):
+            X.append(features.iloc[i:(i + sequence_length)].values)
+            y.append(target.iloc[i + sequence_length])
+        return np.array(X), np.array(y)
 
 
-def time_series_cross_validation(
-        model: DeepLearningModel,
-        X: np.ndarray,
-        y: np.ndarray,
-        n_splits: int = 5,
-        epochs: int = 100,
-        batch_size: int = 16,
-        patience: int = 10
-) -> List[Dict[str, float]]:
+class TimesNetModel(BaseModel):
     """
-    Perform Time-Series Cross-Validation (TSCV) for the given model.
-
-    Args:
-        model: Instance of DeepLearningModel.
-        X: Input features (3D array: samples, timesteps, features).
-        y: Target values (1D or 2D array).
-        n_splits: Number of splits for TSCV.
-        epochs: Number of epochs for training.
-        batch_size: Batch size for training.
-        patience: Patience for early stopping.
-
-    Returns:
-        List of dictionaries containing evaluation metrics for each fold.
+    An implementation of the TimesNet architecture for time series forecasting.
     """
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    fold_metrics = []
+    def build_model(self, input_shape: Tuple, top_k_periods: int = 5, num_kernels: int = 32):
+        
+        def inception_block(input_layer, n_filters):
+            conv1 = Conv2D(filters=n_filters, kernel_size=(1, 1), padding='same', activation='relu')(input_layer)
+            conv3 = Conv2D(filters=n_filters, kernel_size=(3, 3), padding='same', activation='relu')(input_layer)
+            conv5 = Conv2D(filters=n_filters, kernel_size=(5, 5), padding='same', activation='relu')(input_layer)
+            pool = MaxPooling2D(pool_size=(3, 3), strides=1, padding='same')(input_layer)
+            pool = Conv2D(filters=n_filters, kernel_size=(1, 1), padding='same', activation='relu')(pool)
+            return Concatenate(axis=-1)([conv1, conv3, conv5, pool])
 
-    for fold, (train_index, val_index) in enumerate(tscv.split(X), start=1):
-        print(f"\n=== Fold {fold}/{n_splits} ===")
+        def times_block(inputs):
+            fft = tf.signal.rfft(inputs)
+            amp = tf.math.abs(fft)
+            freqs = tf.signal.rfftfreq(inputs.shape[1])
+            
+            top_k_indices = tf.math.top_k(amp, k=top_k_periods).indices
+            top_k_freqs = tf.gather(freqs, top_k_indices, batch_dims=1)
+            periods = tf.cast(tf.round(inputs.shape[1] / top_k_freqs), dtype=tf.int32)
 
-        X_train, X_val = X[train_index], X[val_index]
-        y_train, y_val = y[train_index], y[val_index]
+            outputs = []
+            for i in range(top_k_periods):
+                period = periods[:, i, 0]
+                padding = (period - (inputs.shape[1] % period)) % period
+                padded_inputs = tf.pad(inputs, [[0, 0], [0, padding], [0, 0]])
+                reshaped = tf.reshape(padded_inputs, (tf.shape(inputs)[0], -1, period, inputs.shape[-1]))
+                reshaped = tf.expand_dims(reshaped, axis=-1)
+                conv_out = inception_block(reshaped, num_kernels)
+                flattened = tf.reshape(conv_out, (tf.shape(inputs)[0], -1, conv_out.shape[-1]))
+                outputs.append(flattened[:, :inputs.shape[1], :])
+            
+            return add(outputs)
 
-        print(f"Training data shape: {X_train.shape}, Validation data shape: {X_val.shape}")
+        input_layer = Input(shape=input_shape)
+        x = LayerNormalization()(input_layer)
+        x = times_block(x)
+        x = tf.keras.layers.GlobalAveragePooling1D()(x)
+        x = Dense(64, activation='relu')(x)
+        x = Dropout(0.2)(x)
+        output_layer = Dense(1)(x)
 
-        model.build_lstm_model(
-            input_shape=(X.shape[1], X.shape[2]),
-            lstm_units=[128, 64],
-            dense_units=[32],
-            dropout_rate=0.2,
-            learning_rate=0.0001
-        )
+        model = Model(inputs=input_layer, outputs=output_layer)
+        model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
+        self.model = model
 
-        print("Training model...")
-        model.train_model(
-            X_train, y_train,
-            X_val, y_val,
-            epochs=epochs,
-            batch_size=batch_size,
-            patience=patience,
-            model_prefix=f'{model.model_dir}/deep_learning_model_tscv/tscv_fold_{fold}'
-        )
+    def train(self, X_train: np.ndarray, y_train: np.ndarray, X_val: np.ndarray, y_val: np.ndarray, epochs: int, batch_size: int):
+        if self.model is None:
+            raise RuntimeError("Model must be built before training.")
+        logger.info(f"Training {self.model_name} (TimesNet) for {epochs} epochs...")
+        callbacks = [
+            EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True),
+            ModelCheckpoint(filepath=self.model_path / "best_model.keras", save_best_only=True, monitor='val_loss')
+        ]
+        self.model.fit(X_train, y_train, validation_data=(X_val, y_val), epochs=epochs, batch_size=batch_size, callbacks=callbacks, verbose=1)
+        self.is_fitted = True
+        logger.info("Training complete.")
 
-        print("Evaluating model...")
-        metrics = model.evaluate_model(X_val, y_val, task='regression')
-        fold_metrics.append(metrics)
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise RuntimeError("Model must be trained before prediction.")
+        return self.model.predict(X)
 
-        print(f"Fold {fold} Metrics: {metrics}")
-
-    return fold_metrics
-
-def main():
-    """Test spread forecasting with the DeepLearningModel."""
-    warnings.filterwarnings('ignore')
-
-    engineer = FeatureEngineer(
-        min_periods=10,
-        fill_method='backfill',
-        validate=True
-    )
-
-    def prepare_spread_data():
-        stock1 = pd.read_csv(r"C:\Users\arnav\Downloads\pairs_trading_system\data\raw\AAPL.csv")
-        stock2 = pd.read_csv(r'C:\Users\arnav\Downloads\pairs_trading_system\data\raw\MSFT.csv')
-
-        print("Generating technical indicators for stock 1...")
-        stock1_features = engineer.generate_features(
-            stock1,
-            features=['sma', 'ema', 'rsi', 'macd', 'bbands']
-        )
-
-        print("Generating technical indicators for stock 2...")
-        stock2_features = engineer.generate_features(
-            stock2,
-            features=['sma', 'ema', 'rsi', 'macd', 'bbands']
-        )
-
-        stock1_features['Date'] = pd.to_datetime(stock1_features['Date'])
-        stock2_features['Date'] = pd.to_datetime(stock2_features['Date'])
-
-        df = pd.merge(
-            stock1_features,
-            stock2_features,
-            on='Date',
-            suffixes=('_stock1', '_stock2')
-        )
-
-        df['spread'] = df['Close_stock1'] - df['Close_stock2']
-
-        df['spread_pct'] = df['spread'].pct_change()
-        df['spread_sma'] = df['spread'].rolling(window=20).mean()
-        df['spread_std'] = df['spread'].rolling(window=20).std()
-        df['spread_zscore'] = (df['spread'] - df['spread_sma']) / df['spread_std']
-
-        df['rolling_corr'] = (
-            df['Close_stock1'].rolling(window=20)
-            .corr(df['Close_stock2'])
-        )
-        df['Volume_ROC_stock1'] = df['Volume_stock1'].pct_change(periods=20) * 100
-        df['Volume_ROC_stock2'] = df['Volume_stock2'].pct_change(periods=20) * 100
-
-        df.dropna(inplace=True)
-
-        print(f"\nFeatures generated. Shape: {df.shape}")
-        print("\nFeature columns:", df.columns.tolist())
-        return df
-
-    print("Loading and preparing data...")
-    df = prepare_spread_data()
-    print(f"Data shape: {df.shape}")
-
-    print(df.head(10))
-
-    model = DeepLearningModel()
-
-    feature_columns = [
-        'RSI_stock1', 'RSI_stock2',
-        'MACD_stock1', 'MACD_stock2',
-        'BB_Upper_stock1', 'BB_Lower_stock1',
-        'BB_Upper_stock2', 'BB_Lower_stock2',
-        'SIMPLE_MA_20_stock1', 'SIMPLE_MA_20_stock2',
-        'EXP_MA_20_stock1', 'EXP_MA_20_stock2',
-
-        'Close_stock1', 'Close_stock2', 'Volume_stock2', 'Volume_stock1',
-        'Volume_ROC_stock1', 'Volume_ROC_stock2',
-
-        'rolling_corr',
-        'spread_zscore'
-    ]
-    sequence_length = 10
-
-    X, y = model.prepare_sequences(
-        data=df,
-        target_column='spread',
-        feature_columns=feature_columns,
-        sequence_length=sequence_length,
-        scale_data=True
-    )
-    print(f"Sequence shape: {X.shape}, Target shape: {y.shape}")
-
-    print("\nPerforming Time-Series Cross-Validation...")
-    tscv_results = time_series_cross_validation(
-        model,
-        X,
-        y,
-        n_splits=5,
-        epochs=100,
-        batch_size=16,
-        patience=10
-    )
-
-    print("\nCross-Validation Results:")
-    for i, metrics in enumerate(tscv_results, start=1):
-        print(f"Fold {i} Metrics: {metrics}")
-
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False
-    )
-
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=0.2, shuffle=False
-    )
-
-    print("Data split sizes:")
-    print(f"Train: {X_train.shape}")
-    print(f"Validation: {X_val.shape}")
-    print(f"Test: {X_test.shape}")
-
-    model.build_lstm_model(
-        input_shape=(X.shape[1], X.shape[2]),
-        lstm_units=[128, 64],
-        dense_units=[32],
-        dropout_rate=0.2,
-        learning_rate=0.0001
-    )
-
-    print("\nTraining model...")
-    model.train_model(
-        X_train, y_train,
-        X_val, y_val,
-        epochs=1000,
-        batch_size=16,
-        patience=15,
-        model_prefix=f'{model.model_dir}/deep_learning_model/spread_forecast'
-    )
-
-    print("\nEvaluating model...")
-    metrics = model.evaluate_model(X_test, y_test, task='regression')
-    print("\nTest Metrics:")
-    for metric, value in metrics.items():
-        print(f"{metric}: {value:.4f}")
-
-    print("\nMaking predictions...")
-    predictions = model.predict(X_test)
-    predictions = model.target_scaler.inverse_transform(predictions.reshape(-1, 1)).flatten()
-
-    results = pd.DataFrame({
-        'Actual': model.target_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten(),
-        'Predicted': predictions
-    })
-
-    print("\nFirst few predictions vs actual values:")
-    print(results.head())
-
-    print("\nPlotting training history...")
-    model.plot_training_history(
-        metrics=['loss', 'mae'],
-        title='Spread Forecasting Model Training History',
-        save_path=f'{model.model_dir}/deep_learning_model/spread_forecast_history.html'
-    )
-
-    return model, results
-
-
-if __name__ == "__main__":
-    model, results = main()
+    @staticmethod
+    def create_sequences(features: pd.DataFrame, target: pd.Series, sequence_length: int) -> Tuple[np.ndarray, np.ndarray]:
+        X, y = [], []
+        for i in range(len(features) - sequence_length):
+            feature_slice = features.iloc[i:(i + sequence_length)]
+            if feature_slice.ndim == 1:
+                feature_slice = feature_slice.to_frame()
+            X.append(feature_slice.values)
+            y.append(target.iloc[i + sequence_length])
+        return np.array(X), np.array(y)

@@ -1,9 +1,3 @@
-"""
-Validation Module
-
-Checks data integrity (missing values, data types, outliers).
-"""
-
 import pandas as pd
 import numpy as np
 from typing import List
@@ -16,7 +10,8 @@ def check_missing_values(df: pd.DataFrame) -> pd.Series:
     """
     logger.info("Checking for missing values.")
     missing = df.isnull().sum()
-    logger.debug(f"Missing values per column:\n{missing}")
+    if missing.sum() > 0:
+        logger.debug(f"Missing values per column:\n{missing[missing > 0]}")
     return missing
 
 
@@ -33,8 +28,6 @@ def check_data_types(df: pd.DataFrame) -> pd.Series:
 def check_outliers(df: pd.DataFrame, method: str = 'IQR', factor: float = 1.5) -> pd.DataFrame:
     """
     Identify outliers using IQR or Z-score method.
-
-    Returns a boolean DataFrame: True => outlier.
     """
     logger.info(f"Checking for outliers using method={method}, factor={factor}.")
 
@@ -55,13 +48,14 @@ def check_outliers(df: pd.DataFrame, method: str = 'IQR', factor: float = 1.5) -
         z = numeric_df.apply(zscore)
         outliers = z.abs() > factor
     else:
-        logger.error(f"Outlier detection method '{method}' not supported.")
         raise ValueError(f"Method '{method}' not supported.")
 
     merged_mask = pd.DataFrame(False, index=df.index, columns=df.columns)
     for col in numeric_df.columns:
         merged_mask[col] = outliers[col]
-    logger.debug(f"Outliers detected:\n{merged_mask.sum().sum()} total outlier points.")
+    
+    if merged_mask.sum().sum() > 0:
+        logger.debug(f"Outliers detected:\n{merged_mask.sum().sum()} total outlier points.")
     return merged_mask
 
 
@@ -71,15 +65,6 @@ def validate_dataframe(df: pd.DataFrame,
                        outlier_factor: float = 1.5) -> bool:
     """
     Run a series of validation checks on 'df'.
-
-    Args:
-        df (pd.DataFrame): DataFrame to validate.
-        methods (List[str]): Which validations to run. Options: ['missing', 'dtype', 'outlier'].
-        outlier_method (str): 'IQR' or 'Z-score'.
-        outlier_factor (float): Factor for outlier detection.
-
-    Returns:
-        bool: True if all checks pass, False if any check fails.
     """
     logger.info("Validating dataframe integrity.")
     valid = True
@@ -91,11 +76,11 @@ def validate_dataframe(df: pd.DataFrame,
             valid = False
 
     if 'dtype' in methods:
-        dtypes = check_data_types(df)
-        non_numeric_cols = dtypes[~dtypes.apply(lambda x: np.issubdtype(x, np.number))]
-        if not non_numeric_cols.empty:
-            logger.warning(f"Non-numeric columns detected:\n{non_numeric_cols}")
-            valid = False
+        expected_numeric = ['Open', 'High', 'Low', 'Close', 'Adj_Close', 'Volume']
+        for col in expected_numeric:
+            if col in df.columns and not pd.api.types.is_numeric_dtype(df[col]):
+                logger.warning(f"Column '{col}' is not numeric. Found type: {df[col].dtype}")
+                valid = False
 
     if 'outlier' in methods:
         outliers_mask = check_outliers(df, method=outlier_method, factor=outlier_factor)

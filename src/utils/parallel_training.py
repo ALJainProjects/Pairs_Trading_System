@@ -1,9 +1,3 @@
-"""
-Parallel Training Module
-
-Enhances computational efficiency for model training tasks by using multiprocessing.
-"""
-
 import multiprocessing
 from multiprocessing import Pool
 from typing import List, Tuple, Callable, Any, Dict
@@ -13,14 +7,6 @@ from config.logging_config import logger
 def train_model(model_func: Callable, *args, **kwargs) -> Any:
     """
     Wrapper for parallel execution of a model training function.
-
-    Args:
-        model_func (Callable): A function that returns a trained model or output.
-        *args: Positional arguments for 'model_func'.
-        **kwargs: Keyword arguments for 'model_func'.
-
-    Returns:
-        Any: The trained model or relevant result from 'model_func', or None on error.
     """
     try:
         model = model_func(*args, **kwargs)
@@ -36,21 +22,11 @@ def train_models_in_parallel(model_funcs: List[Callable],
                              kwargs_list: List[Dict],
                              n_jobs: int = None) -> List[Any]:
     """
-    Train multiple models_data in parallel, each with potentially different functions and arguments.
-
-    Args:
-        model_funcs (List[Callable]): List of callables to train models_data.
-        args_list (List[Tuple]): Positional arguments for each model_func.
-        kwargs_list (List[Dict]): Keyword arguments for each model_func.
-        n_jobs (int): Number of processes to use. Defaults to all CPU cores.
-
-    Returns:
-        List[Any]: List of model results. Each entry corresponds to the result
-                   of calling 'model_funcs[i]' with 'args_list[i]' and 'kwargs_list[i]'.
+    Train multiple models in parallel.
     """
     if n_jobs is None:
         n_jobs = multiprocessing.cpu_count()
-    logger.info(f"Training {len(model_funcs)} models_data in parallel with {n_jobs} processes.")
+    logger.info(f"Training {len(model_funcs)} models in parallel with {n_jobs} processes.")
 
     tasks = zip(model_funcs, args_list, kwargs_list)
     with Pool(processes=n_jobs) as pool:
@@ -69,16 +45,6 @@ def parallel_grid_search(model_train_func: Callable,
                          n_jobs: int = None) -> List[Dict]:
     """
     Perform a parallelized grid search over a list of parameter dictionaries.
-
-    Args:
-        model_train_func (Callable): A function that trains a model given parameters and data, returning (model, metrics).
-        param_grid (List[Dict]): Each dict is a param set to try.
-        X_train, y_train: Training data.
-        X_val, y_val: Validation data.
-        n_jobs (int): Number of processes. Defaults to all cores.
-
-    Returns:
-        List[Dict]: Each item has {'params': param_dict, 'metrics': metrics_or_None}.
     """
     if n_jobs is None:
         n_jobs = multiprocessing.cpu_count()

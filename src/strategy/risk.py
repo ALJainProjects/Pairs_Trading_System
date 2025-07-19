@@ -1,383 +1,119 @@
-from typing import Dict, Tuple, Optional
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass, field
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from typing import Dict, Tuple, List
 from config.logging_config import logger
 
 
-class MarketImpactModel:
-    """Model to estimate market impact costs."""
-    def __init__(self):
-        self.impact_coefficient = 0.1
-        self.min_spread = 0.0001
+class PortfolioRiskManager:
+    """
+    Manages risk at both the individual position and overall portfolio level.
+    This class is responsible for position sizing, enforcing risk limits, and
+    applying dynamic stop-losses.
+    """
 
-    def calculate_market_impact(self, trade_size: float, price: float) -> float:
-        """Calculate market impact cost for a trade."""
-        return trade_size * price * self.impact_coefficient
+    def __init__(self,
+                 initial_capital: float,
+                 max_portfolio_exposure: float = 1.0,  # Max leverage
+                 max_position_concentration: float = 0.2,  # Max % of portfolio in one asset
+                 default_position_risk_pct: float = 0.02,  # Risk 2% of portfolio per trade
+                 atr_stop_multiplier: float = 3.0,  # ATR-based stop loss multiplier
+                 atr_period: int = 20):
 
-@dataclass
-class RiskMetrics:
-    """Enhanced risk metrics structure"""
-    var_95: float = 0.0
-    cvar_95: float = 0.0
-    volatility: float = 0.0
-    correlation_risk: float = 0.0
-    model_confidence: float = 0.0
-    cointegration_stability: float = 0.0
-    pair_metrics: Dict = field(default_factory=dict)
+        self.initial_capital = initial_capital
+        self.max_portfolio_exposure = max_portfolio_exposure
+        self.max_position_concentration = max_position_concentration
+        self.default_position_risk_pct = default_position_risk_pct
+        self.atr_stop_multiplier = atr_stop_multiplier
+        self.atr_period = atr_period
 
-class PairRiskManager:
-    """Enhanced risk manager with integrated ML/DL confidence scores and advanced metrics"""
+    def calculate_target_positions(self,
+                                   raw_signals: Dict[Tuple[str, str], float],
+                                   current_prices: Dict[str, float],
+                                   historical_data: pd.DataFrame,
+                                   portfolio_equity: float) -> Dict[Tuple[str, str], Dict[str, float]]:
+        """
+        Translates raw strategy signals into target dollar positions based on risk.
 
-    def __init__(
-            self,
-            max_position_size: float = 0.05,
-            max_drawdown: float = 0.20,
-            stop_loss_threshold: float = 0.10,
-            max_correlation: float = 0.7,
-            leverage_limit: float = 2.0,
-            var_confidence: float = 0.95,
-            min_model_confidence: float = 0.6,
-            max_correlation_exposure: float = 0.3
-    ):
-        self.cost_model = MarketImpactModel()
-        self.max_position_size = max_position_size
-        self.max_drawdown = max_drawdown
-        self.stop_loss_threshold = stop_loss_threshold
-        self.max_correlation = max_correlation
-        self.leverage_limit = leverage_limit
-        self.var_confidence = var_confidence
-        self.min_model_confidence = min_model_confidence
-        self.max_correlation_exposure = max_correlation_exposure
+        Args:
+            raw_signals (Dict): Raw signals from the strategy (e.g., -1, 0, 1).
+            current_prices (Dict): Current market prices of all assets.
+            historical_data (pd.DataFrame): Historical data for ATR calculation.
+            portfolio_equity (float): Current total equity of the portfolio.
 
-        self.risk_metrics = {}
-        self.correlation_matrix = pd.DataFrame()
-        self.position_history = []
+        Returns:
+            Dict: A dictionary mapping pairs to their target dollar positions for each leg.
+        """
+        target_positions = {}
 
-    def calculate_market_impact_cost(self, trade_size: float, price: float) -> float:
-        """Calculate market impact cost for a trade."""
-        return self.cost_model.calculate_market_impact(trade_size, price)
-
-    def _calculate_pair_correlation(self, pair1: Tuple[str, str],
-                                    pair2: Tuple[str, str]) -> float:
-        """Calculate correlation between two pairs"""
-        try:
-            spread1 = self._get_pair_spread(pair1)
-            spread2 = self._get_pair_spread(pair2)
-
-            if spread1 is not None and spread2 is not None:
-                correlation = spread1.corr(spread2)
-                return correlation if not np.isnan(correlation) else 0.0
-            return 0.0
-
-        except Exception as e:
-            logger.warning(f"Error calculating pair correlation: {str(e)}")
-            return 0.0
-
-    def _get_pair_spread(self, pair: Tuple[str, str]) -> Optional[pd.Series]:
-        """Calculate spread series for a pair"""
-        asset1, asset2 = pair
-        if asset1 in self.correlation_matrix.index and asset2 in self.correlation_matrix.index:
-            spread = self.correlation_matrix[asset1] - self.correlation_matrix[asset2]
-            return spread
-        return None
-
-    def calculate_drawdown(self, equity_curve: pd.Series) -> float:
-        """Calculate current drawdown"""
-        if len(equity_curve) < 1:
-            return 0.0
-        peak = equity_curve.expanding().max()
-        drawdown = (equity_curve - peak) / peak
-        return abs(float(drawdown.iloc[-1]))
-
-    def calculate_var_cvar(self, returns: pd.Series) -> Tuple[float, float]:
-        """Calculate Value at Risk and Conditional Value at Risk"""
-        if len(returns) < 2:
-            return 0.0, 0.0
-
-        sorted_returns = np.sort(returns.values)
-        var_idx = int(len(returns) * (1 - self.var_confidence))
-        var = float(sorted_returns[var_idx])
-        cvar = float(sorted_returns[:var_idx].mean())
-
-        return abs(var), abs(cvar)
-
-    def update_risk_metrics(self,
-                            pair: Tuple[str, str],
-                            prices: pd.DataFrame,
-                            positions: Dict,
-                            model_confidence: Optional[float] = None) -> RiskMetrics:
-        """Update comprehensive risk metrics for a pair"""
-        try:
-            prices = prices.copy()
-            prices['Date'] = pd.to_datetime(prices['Date'])
-
-            price_matrix = prices.pivot(
-                index='Date',
-                columns='Symbol',
-                values='Adj_Close'
-            ).sort_index()
-
-            price_matrix = price_matrix.reset_index()
-
-            print(prices.head(10))
-            print(price_matrix.head(10))
-            price_series = price_matrix.set_index('Date')
-            self.correlation_matrix = price_series.pct_change().dropna()
-
-            returns = self._calculate_pair_returns(pair, price_series)
-            var, cvar = self.calculate_var_cvar(returns)
-
-            metrics = RiskMetrics(
-                var_95=var,
-                cvar_95=cvar,
-                volatility=returns.std() if len(returns) > 1 else 0.0,
-                correlation_risk=self._calculate_correlation_risk(pair, positions),
-                model_confidence=model_confidence or 1.0,
-                cointegration_stability=self._calculate_cointegration_stability(pair, prices)
-            )
-
-            self.risk_metrics[pair] = metrics
-            return metrics
-
-        except Exception as e:
-            logger.error(f"Error in update_risk_metrics: {str(e)}")
-            raise
-
-    def calculate_position_size(self,
-                                portfolio_value: float,
-                                pair: Tuple[str, str],
-                                prices: pd.DataFrame,
-                                model_confidence: Optional[float] = None,
-                                correlation_matrix: Optional[pd.DataFrame] = None) -> float:
-        """Calculate position size with enhanced risk adjustments"""
-        try:
-            base_size = self.max_position_size * portfolio_value
-
-            if model_confidence is not None:
-                if model_confidence < self.min_model_confidence:
-                    return 0.0
-                base_size *= model_confidence
-
-            pair_returns = self._calculate_pair_returns(pair, prices)
-            if pair_returns.empty:
-                logger.warning(f"Unable to calculate returns for pair {pair}, setting position size to 0")
-                return 0.0
-
-            vol_adjustment = self._calculate_volatility_adjustment(pair_returns)
-            base_size *= vol_adjustment
-
-            if correlation_matrix is not None:
-                corr_adjustment = self._calculate_correlation_adjustment(pair, correlation_matrix)
-                base_size *= corr_adjustment
-
-            var, _ = self.calculate_var_cvar(pair_returns)
-            var_adjustment = 1.0 / (1.0 + var)
-            base_size *= var_adjustment
-
-            return min(base_size, self.max_position_size * portfolio_value)
-
-        except Exception as e:
-            logger.error(f"Error calculating position size for pair {pair}: {str(e)}")
-            return 0.0
-
-    def _calculate_pair_returns(self, pair: Tuple[str, str], prices: pd.DataFrame) -> pd.Series:
-        """Calculate returns for a pair with forward and backward filling of missing data"""
-        asset1, asset2 = pair
-
-        if 'Symbol' in prices.columns:
-
-            price_matrix = prices.pivot(
-                index='Date',
-                columns='Symbol',
-                values='Adj_Close'
-            ).sort_index()
-
-            price_matrix = price_matrix.ffill().bfill()
-
-            if asset1 not in price_matrix.columns or asset2 not in price_matrix.columns:
-                logger.warning(f"Missing asset data for {asset1} or {asset2}")
-                return pd.Series(dtype=float)
-
-            price1 = price_matrix[asset1]
-            price2 = price_matrix[asset2]
-        else:
-            if asset1 not in prices.columns or asset2 not in prices.columns:
-                logger.warning(f"Missing asset data for {asset1} or {asset2}")
-                return pd.Series(dtype=float)
-
-            prices = prices.ffill().bfill()
-            price1 = prices[asset1]
-            price2 = prices[asset2]
-
-        spread = price1 - price2
-        return spread.pct_change().dropna()
-        
-    def _calculate_volatility_adjustment(self, returns: pd.Series) -> float:
-        """Calculate volatility-based position adjustment"""
-        if len(returns) < 2:
-            return 1.0
-        vol = returns.std()
-        return 1.0 / (1.0 + vol)
-        
-    def _calculate_correlation_adjustment(self, 
-                                       pair: Tuple[str, str],
-                                       correlation_matrix: pd.DataFrame) -> float:
-        """Calculate correlation-based position adjustment"""
-        asset1, asset2 = pair
-        if asset1 not in correlation_matrix.index or asset2 not in correlation_matrix.index:
-            return 1.0
-            
-        pair_correlations = correlation_matrix.loc[asset1] + correlation_matrix.loc[asset2]
-        avg_correlation = pair_correlations.abs().mean()
-        
-        if avg_correlation > self.max_correlation:
-            return 0.0
-            
-        return 1.0 - (avg_correlation / self.max_correlation)
-        
-    def _calculate_correlation_risk(self, pair: Tuple[str, str], positions: Dict) -> float:
-        """Calculate correlation-based risk exposure"""
-        if not positions or not self.correlation_matrix.empty:
-            return 0.0
-            
-        active_pairs = list(positions.keys())
-        if not active_pairs:
-            return 0.0
-            
-        total_correlation = 0.0
-        count = 0
-        
-        for active_pair in active_pairs:
-            if active_pair == pair:
+        for pair, signal in raw_signals.items():
+            if signal == 0:
                 continue
-                
-            corr = self._calculate_pair_correlation(pair, active_pair)
-            if not np.isnan(corr):
-                total_correlation += abs(corr)
-                count += 1
-                
-        return total_correlation / count if count > 0 else 0.0
-        
-    def _calculate_cointegration_stability(self, 
-                                         pair: Tuple[str, str],
-                                         prices: pd.DataFrame,
-                                         window: int = 63) -> float:
-        """Calculate stability of cointegration relationship"""
-        asset1, asset2 = pair
-        if asset1 not in prices.columns or asset2 not in prices.columns:
-            return 0.0
-            
-        from statsmodels.tsa.stattools import coint
-        stability_scores = []
-        
-        for i in range(window, len(prices)):
-            _, pvalue, _ = coint(
-                prices[asset1].iloc[i-window:i],
-                prices[asset2].iloc[i-window:i]
-            )
-            stability_scores.append(1 - pvalue)
-            
-        return np.mean(stability_scores) if stability_scores else 0.0
-        
-    def check_risk_limits(self,
-                         equity_curve: pd.Series,
-                         positions: Dict,
-                         current_prices: Dict[str, float]) -> Tuple[bool, str]:
-        """Check comprehensive risk limits"""
-        if self.calculate_drawdown(equity_curve) > self.max_drawdown:
-            return True, "Maximum drawdown exceeded"
 
-        portfolio_returns = equity_curve.pct_change().dropna()
-        var, cvar = self.calculate_var_cvar(portfolio_returns)
-        if cvar > self.max_drawdown:
-            return True, "CVaR limit exceeded"
+            asset1, asset2 = pair
+            if asset1 not in current_prices or asset2 not in current_prices:
+                continue
 
-        total_correlation_exposure = sum(
-            self.risk_metrics[pair].correlation_risk
-            for pair in positions
-            if pair in self.risk_metrics
-        )
-        if total_correlation_exposure > self.max_correlation_exposure:
-            return True, "Correlation exposure limit exceeded"
+            # Calculate ATR for the spread to determine stop-loss distance
+            spread_history = historical_data[asset1] - historical_data[asset2]  # Simple spread for risk sizing
+            atr = self.calculate_atr(spread_history, self.atr_period)
+            if atr == 0: continue
 
-        low_confidence_positions = [
-            pair for pair in positions
-            if pair in self.risk_metrics
-            and self.risk_metrics[pair].model_confidence < self.min_model_confidence
-        ]
-        if low_confidence_positions:
-            return True, "Model confidence below threshold"
-            
-        return False, ""
-        
-    def plot_risk_metrics(self) -> go.Figure:
-        """Create visualization of risk metrics"""
-        metrics_df = pd.DataFrame({
-            pair: {
-                'VaR': metrics.var_95,
-                'CVaR': metrics.cvar_95,
-                'Volatility': metrics.volatility,
-                'Correlation Risk': metrics.correlation_risk,
-                'Model Confidence': metrics.model_confidence,
-                'Cointegration Stability': metrics.cointegration_stability
+            stop_loss_distance = atr * self.atr_stop_multiplier
+
+            # Position sizing based on volatility
+            risk_per_unit = stop_loss_distance
+            risk_amount = portfolio_equity * self.default_position_risk_pct
+
+            num_units = risk_amount / risk_per_unit if risk_per_unit > 0 else 0
+
+            # Calculate dollar value for each leg
+            position_value1 = num_units * current_prices[asset1]
+            position_value2 = num_units * current_prices[asset2]
+
+            # Apply signal direction
+            target_positions[pair] = {
+                asset1: signal * position_value1,
+                asset2: -signal * position_value2,
             }
-            for pair, metrics in self.risk_metrics.items()
-        }).T
-        
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=(
-                'Risk Metrics Distribution',
-                'Model Confidence vs. Correlation Risk',
-                'VaR/CVaR Analysis',
-                'Cointegration Stability'
-            )
-        )
 
-        for col in metrics_df.columns:
-            fig.add_trace(
-                go.Box(y=metrics_df[col], name=col),
-                row=1, col=1
-            )
+        return self.enforce_portfolio_limits(target_positions, portfolio_equity)
 
-        fig.add_trace(
-            go.Scatter(
-                x=metrics_df['Model Confidence'],
-                y=metrics_df['Correlation Risk'],
-                mode='markers',
-                name='Confidence vs Risk'
-            ),
-            row=1, col=2
-        )
+    def enforce_portfolio_limits(self,
+                                 target_positions: Dict,
+                                 portfolio_equity: float) -> Dict:
+        """Enforces portfolio-level exposure and concentration limits."""
 
-        fig.add_trace(
-            go.Scatter(
-                x=metrics_df.index,
-                y=metrics_df['VaR'],
-                name='VaR'
-            ),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=metrics_df.index,
-                y=metrics_df['CVaR'],
-                name='CVaR'
-            ),
-            row=2, col=1
-        )
+        # 1. Concentration Limit
+        asset_exposure = {}
+        for pair, legs in target_positions.items():
+            for asset, value in legs.items():
+                asset_exposure[asset] = asset_exposure.get(asset, 0) + abs(value)
 
-        fig.add_trace(
-            go.Bar(
-                x=metrics_df.index,
-                y=metrics_df['Cointegration Stability'],
-                name='Cointegration Stability'
-            ),
-            row=2, col=2
-        )
-        
-        fig.update_layout(height=800, title_text="Risk Analysis Dashboard")
-        return fig
+        max_allowed_asset_value = portfolio_equity * self.max_position_concentration
+        for asset, exposure in asset_exposure.items():
+            if exposure > max_allowed_asset_value:
+                scale_down = max_allowed_asset_value / exposure
+                logger.warning(f"Breached concentration limit for {asset}. Scaling down by {scale_down:.2f}.")
+                for pair, legs in target_positions.items():
+                    if asset in legs:
+                        legs[asset] *= scale_down
+
+        # 2. Total Exposure Limit
+        total_exposure = sum(abs(v) for legs in target_positions.values() for v in legs.values())
+        max_allowed_exposure = portfolio_equity * self.max_portfolio_exposure
+
+        if total_exposure > max_allowed_exposure:
+            scale_down = max_allowed_exposure / total_exposure
+            logger.warning(f"Breached total exposure limit. Scaling all positions by {scale_down:.2f}.")
+            for pair, legs in target_positions.items():
+                for asset in legs:
+                    legs[asset] *= scale_down
+
+        return target_positions
+
+    @staticmethod
+    def calculate_atr(series: pd.Series, period: int) -> float:
+        """Calculates the Average True Range for a given series."""
+        if len(series) < period: return 0.0
+        high_low = series.rolling(window=period).max() - series.rolling(window=period).min()
+        return high_low.mean()

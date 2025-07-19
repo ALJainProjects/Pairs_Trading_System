@@ -1,3 +1,0 @@
-Strategy Performance:
-OLS Strategy Final Return: 0.0859
-Ratio Strategy Final Return: 0.2319

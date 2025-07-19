@@ -1,27 +1,48 @@
-# config/logging_config.py
-
 import logging
-import os
+import sys
 from logging.handlers import RotatingFileHandler
-from .settings import LOG_DIR, LOG_FILE
+import colorlog
+from .settings import LOG_FILE
 
-os.makedirs(LOG_DIR, exist_ok=True)
+# Use colorlog for more readable development logs and add more structure.
 
-logger = logging.getLogger('pair_trading_logger')
-logger.setLevel(logging.DEBUG)
+# --- Configuration ---
+LOG_LEVEL = logging.DEBUG
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)"
+CONSOLE_LOG_FORMAT = "%(log_color)s%(levelname)-8s%(reset)s %(blue)s%(message)s"
+MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+BACKUP_COUNT = 5
 
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
+# --- Get Root Logger ---
+logger = logging.getLogger("pair_trading_system")
+logger.setLevel(LOG_LEVEL)
+logger.propagate = False  # Prevent duplicate logs
 
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
-file_handler.setLevel(logging.DEBUG)
-
-console_format = logging.Formatter('%(levelname)s - %(message)s')
-file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-console_handler.setFormatter(console_format)
-file_handler.setFormatter(file_format)
-
-if not logger.handlers:
+# --- Console Handler ---
+if not any(isinstance(h, colorlog.StreamHandler) for h in logger.handlers):
+    console_handler = colorlog.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO) # Keep console output concise
+    console_formatter = colorlog.ColoredFormatter(
+        CONSOLE_LOG_FORMAT,
+        log_colors={
+            'DEBUG':    'cyan',
+            'INFO':     'green',
+            'WARNING':  'yellow',
+            'ERROR':    'red',
+            'CRITICAL': 'red,bg_white',
+        }
+    )
+    console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
+
+# --- File Handler ---
+if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
+    file_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=MAX_BYTES,
+        backupCount=BACKUP_COUNT
+    )
+    file_handler.setLevel(logging.DEBUG) # Log everything to the file
+    file_formatter = logging.Formatter(LOG_FORMAT)
+    file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)

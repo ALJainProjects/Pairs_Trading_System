@@ -1,731 +1,156 @@
-"""
-Consolidated Correlation Analysis Module
-
-This module provides functionality for:
-1. Standard Pearson correlation analysis
-2. Partial correlation analysis
-3. Rolling correlation analysis
-4. Visualization tools
-5. Statistical analysis and hypothesis testing
-"""
-
-from __future__ import annotations
 import pandas as pd
 import numpy as np
 from scipy.linalg import pinv
-import plotly.graph_objects as go
 from scipy import stats
-from typing import Dict, List, Tuple, Optional, Union, Any
-from pathlib import Path
-import warnings
-from dataclasses import dataclass
-from datetime import datetime
-import logging
+import plotly.graph_objects as go
+import seaborn as sns
+import matplotlib.pyplot as plt
+from typing import Tuple, Optional
 from functools import lru_cache
-
 from statsmodels.stats.multitest import multipletests
+from config.logging_config import logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-@dataclass
-class CorrelationConfig:
-    """Configuration for correlation analysis."""
-    CORRELATION_THRESHOLDS: Dict[str, float] = None
-    MIN_OBSERVATIONS: int = 30
-    DEFAULT_WINDOW: int = 504
-    MAX_ASSETS_DISPLAY: int = 150
-    TIMEOUT_SECONDS: int = 300
-
-    def __post_init__(self):
-        if self.CORRELATION_THRESHOLDS is None:
-            self.CORRELATION_THRESHOLDS = {
-                'very_high': 0.9,
-                'high': 0.7,
-                'moderate': 0.5
-            }
-
-class DataValidationError(Exception):
-    """Custom exception for data validation errors."""
-    pass
-
-class CalculationError(Exception):
-    """Custom exception for calculation errors."""
-    pass
-
-def validate_pair_name(asset1: str, asset2: str) -> str:
-    """Create a unique and safe pair identifier."""
-    return f"{asset1}|||{asset2}"
-
-def parse_pair_name(pair_name: str) -> Any:
-    """Parse pair identifier back into asset names."""
-    return tuple(pair_name.split('|||'))
 
 class CorrelationAnalyzer:
-    """Class for comprehensive correlation analysis."""
+    """
+    Performs comprehensive correlation analysis on asset returns, including Pearson,
+    Spearman, and partial correlations, along with stability analysis and advanced visualizations.
+    """
 
-    def __init__(self, returns: pd.DataFrame, config: Optional[CorrelationConfig] = None):
-        """
-        Initialize correlation analyzer.
-
-        Args:
-            returns (pd.DataFrame): Asset returns with datetime index
-            config (Optional[CorrelationConfig]): Configuration parameters
-
-        Raises:
-            DataValidationError: If input data validation fails
-        """
-        self.config = config or CorrelationConfig()
+    def __init__(self, returns: pd.DataFrame):
         self._validate_input(returns)
         self.returns = returns
         self.pearson_corr_: Optional[pd.DataFrame] = None
+        self.spearman_corr_: Optional[pd.DataFrame] = None
         self.partial_corr_: Optional[pd.DataFrame] = None
-        self.rolling_corr_: Optional[Dict[str, pd.Series]] = None
-        self.rolling_window_: Optional[int] = None
-        self._last_update = datetime.now()
 
-    def _validate_input(self, returns: pd.DataFrame) -> None:
-        """
-        Validate input data.
-
-        Raises:
-            DataValidationError: If validation fails
-        """
-        if not isinstance(returns, pd.DataFrame):
-            raise DataValidationError("Input must be a pandas DataFrame")
-
-        if not isinstance(returns.index, pd.DatetimeIndex):
-            raise DataValidationError("DataFrame must have DatetimeIndex")
-
-        if returns.empty:
-            raise DataValidationError("Empty returns DataFrame")
-
+    def _validate_input(self, returns: pd.DataFrame):
+        if not isinstance(returns, pd.DataFrame) or not isinstance(returns.index, pd.DatetimeIndex):
+            raise ValueError("Input must be a pandas DataFrame with a DatetimeIndex.")
         if returns.isnull().any().any():
-            raise DataValidationError("Returns contain missing values")
+            raise ValueError("Input returns contain NaN values.")
 
-        if len(returns) < self.config.MIN_OBSERVATIONS:
-            raise DataValidationError(
-                f"Insufficient observations. Need at least {self.config.MIN_OBSERVATIONS}"
-            )
-
-        zero_var_cols = returns.columns[returns.std() == 0]
-        if not zero_var_cols.empty:
-            raise DataValidationError(
-                f"Constant columns detected: {', '.join(zero_var_cols)}"
-            )
-
-    @lru_cache(maxsize=1)
-    def calculate_pearson_correlation(self) -> pd.DataFrame:
+    @lru_cache(maxsize=2)
+    def calculate_correlation(self, method: str = 'pearson') -> pd.DataFrame:
         """
-        Calculate Pearson correlation matrix.
-
-        Returns:
-            pd.DataFrame: Correlation matrix
-
-        Raises:
-            CalculationError: If calculation fails
+        Calculates the correlation matrix using the specified method.
         """
-        try:
-            logger.info("Calculating Pearson correlation matrix.")
-            self.pearson_corr_ = self.returns.corr(method="pearson")
+        logger.info(f"Calculating {method} correlation matrix.")
+        if method == 'pearson':
+            if self.pearson_corr_ is None:
+                self.pearson_corr_ = self.returns.corr(method='pearson')
             return self.pearson_corr_
-        except Exception as e:
-            raise CalculationError(f"Failed to calculate Pearson correlation: {str(e)}")
 
-    def calculate_partial_correlation(self) -> pd.DataFrame:
-        """
-        Calculate partial correlation matrix.
+        elif method == 'spearman':
+            if self.spearman_corr_ is None:
+                self.spearman_corr_ = self.returns.corr(method='spearman')
+            return self.spearman_corr_
 
-        Returns:
-            pd.DataFrame: Partial correlation matrix
-
-        Raises:
-            CalculationError: If calculation fails
-        """
-        try:
-            logger.info("Calculating partial correlation matrix.")
-
-            cov = self.returns.cov().values
-            prec = pinv(cov)
-
-            d = np.sqrt(np.diag(prec))
-            d_outer = np.outer(d, d)
-
-            mask = d_outer != 0
-            partial_corr = np.zeros_like(prec)
-            partial_corr[mask] = -prec[mask] / d_outer[mask]
-            np.fill_diagonal(partial_corr, 1.0)
-
-            self.partial_corr_ = pd.DataFrame(
-                partial_corr,
-                index=self.returns.columns,
-                columns=self.returns.columns
-            )
+        elif method == 'partial':
+            if self.partial_corr_ is None:
+                self.partial_corr_ = self._calculate_partial_correlation()
             return self.partial_corr_
+        else:
+            raise ValueError("Method must be one of 'pearson', 'spearman', or 'partial'.")
 
-        except Exception as e:
-            raise CalculationError(f"Failed to calculate partial correlation: {str(e)}")
+    def _calculate_partial_correlation(self) -> pd.DataFrame:
+        cov = self.returns.cov().values
+        precision_matrix = pinv(cov)
+        diag = np.sqrt(np.diag(precision_matrix))
+        outer_diag = np.outer(diag, diag)
+        partial_corr = -precision_matrix / outer_diag
+        np.fill_diagonal(partial_corr, 1)
+        return pd.DataFrame(partial_corr, index=self.returns.columns, columns=self.returns.columns)
 
-    def calculate_rolling_correlation(self, window: Optional[int] = None) -> Dict[str, pd.Series]:
+    def get_highly_correlated_pairs(self, method: str = 'pearson', threshold: float = 0.7) -> pd.DataFrame:
         """
-        Calculate rolling correlations for all pairs.
+        Finds pairs of assets with correlation above a given threshold.
+        """
+        corr_matrix = self.calculate_correlation(method)
+        upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+        high_corr = upper_tri[abs(upper_tri) > threshold].stack().reset_index()
+        high_corr.columns = ['Asset1', 'Asset2', 'Correlation']
+        high_corr['Abs_Correlation'] = high_corr['Correlation'].abs()
+        return high_corr.sort_values('Abs_Correlation', ascending=False).drop(columns='Abs_Correlation')
+
+    def calculate_correlation_significance(self, corr_matrix: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculates the raw p-values for a Pearson correlation matrix.
+        """
+        n = len(self.returns)
+        t_stat_squared = (n - 2) * (corr_matrix ** 2) / (1 - corr_matrix ** 2)
+        p_values = stats.f.sf(t_stat_squared, 1, n - 2)
+
+        p_value_df = pd.DataFrame(p_values, index=corr_matrix.index, columns=corr_matrix.columns)
+        np.fill_diagonal(p_value_df.values, np.nan)
+        return p_value_df
+
+    def correct_pvalues_for_multiple_testing(self, p_values: pd.DataFrame, alpha: float = 0.05,
+                                             method: str = 'fdr_bh') -> pd.DataFrame:
+        """
+        Applies a multiple hypothesis testing correction to a matrix of p-values.
 
         Args:
-            window (Optional[int]): Rolling window size in days
+            p_values (pd.DataFrame): The matrix of raw p-values.
+            alpha (float): The significance level.
+            method (str): The correction method to use ('bonferroni', 'holm', 'fdr_bh').
 
         Returns:
-            Dict[str, pd.Series]: Dictionary of rolling correlations for each pair
-
-        Raises:
-            CalculationError: If calculation fails
+            pd.DataFrame: A matrix of the corrected p-values.
         """
-        try:
-            window = window or self.config.DEFAULT_WINDOW
-            logger.info(f"Calculating rolling correlations with window={window}")
+        # Extract the upper triangle of the p-values, excluding the diagonal
+        p_values_flat = p_values.where(np.triu(np.ones(p_values.shape), k=1).astype(bool)).stack().values
 
-            if (self.rolling_corr_ is not None and
-                self.rolling_window_ == window):
-                return self.rolling_corr_
+        if len(p_values_flat) == 0:
+            return p_values  # Return original if no tests to correct
 
-            rolling_corrs = {}
-            n_assets = len(self.returns.columns)
+        # Apply the correction
+        reject, pvals_corrected, _, _ = multipletests(p_values_flat, alpha=alpha, method=method)
 
-            combinations = [
-                (i, j) for i in range(n_assets)
-                for j in range(i + 1, n_assets)
-            ]
+        # Reconstruct the corrected p-value matrix
+        corrected_df = p_values.copy()
+        p_value_map = dict(
+            zip(p_values.where(np.triu(np.ones(p_values.shape), k=1).astype(bool)).stack().index, pvals_corrected))
 
-            for i, j in combinations:
-                asset1, asset2 = self.returns.columns[i], self.returns.columns[j]
-                pair_name = validate_pair_name(asset1, asset2)
+        for (row, col), val in p_value_map.items():
+            corrected_df.loc[row, col] = val
+            corrected_df.loc[col, row] = val
 
-                rolling_corr = self.returns[asset1].rolling(
-                    window=window,
-                    min_periods=self.config.MIN_OBSERVATIONS
-                ).corr(self.returns[asset2])
+        return corrected_df
 
-                rolling_corrs[pair_name] = rolling_corr
-
-            self.rolling_corr_ = rolling_corrs
-            self.rolling_window_ = window
-            return rolling_corrs
-
-        except Exception as e:
-            raise CalculationError(f"Failed to calculate rolling correlation: {str(e)}")
-
-    def get_highly_correlated_pairs(self,
-                                  correlation_type: str = 'pearson',
-                                  threshold: Optional[float] = None,
-                                    absolute: bool = False) -> pd.DataFrame:
+    def plot_correlation_matrix(self, method: str = 'pearson', title: Optional[str] = None) -> go.Figure:
         """
-        Find highly correlated pairs.
-
-        Args:
-            correlation_type (str): 'pearson' or 'partial'
-            threshold (Optional[float]): Minimum absolute correlation
-
-        Returns:
-            pd.DataFrame: Highly correlated pairs with their correlations
-
-        Raises:
-            ValueError: If invalid correlation type
-            CalculationError: If calculation fails
+        Generates an interactive heatmap of the correlation matrix.
         """
-        threshold = threshold or self.config.CORRELATION_THRESHOLDS['high']
-
-        try:
-            if correlation_type == 'pearson':
-                if self.pearson_corr_ is None:
-                    self.calculate_pearson_correlation()
-                corr_matrix = self.pearson_corr_
-            elif correlation_type == 'partial':
-                if self.partial_corr_ is None:
-                    self.calculate_partial_correlation()
-                corr_matrix = self.partial_corr_
-            else:
-                raise ValueError("correlation_type must be 'pearson' or 'partial'")
-
-            mask = np.triu(np.abs(corr_matrix) >= threshold, k=1)
-            pairs = []
-
-            rows, cols = np.where(mask)
-            for i, j in zip(rows, cols):
-                pairs.append({
-                    'asset1': corr_matrix.columns[i],
-                    'asset2': corr_matrix.columns[j],
-                    'correlation': corr_matrix.iloc[i, j]
-                })
-
-            pairs_df = pd.DataFrame(pairs).sort_values('correlation', ascending=False, key=np.abs if absolute else None)
-
-            return pairs_df
-
-        except Exception as e:
-            raise CalculationError(f"Failed to get highly correlated pairs: {str(e)}")
-
-    def analyze_correlation_stability(self,
-                                   window: Optional[int] = None) -> pd.DataFrame:
-        """
-        Analyze stability of correlations over time.
-
-        Args:
-            window (Optional[int]): Rolling window size
-
-        Returns:
-            pd.DataFrame: Stability metrics for each pair
-
-        Raises:
-            CalculationError: If calculation fails
-        """
-        try:
-            if self.rolling_corr_ is None:
-                self.calculate_rolling_correlation(window)
-
-            stability_metrics = {}
-            for pair, rolling_corr in self.rolling_corr_.items():
-                asset1, asset2 = parse_pair_name(pair)
-
-                metrics = {
-                    'asset1': asset1,
-                    'asset2': asset2,
-                    'mean': rolling_corr.mean(),
-                    'std': rolling_corr.std(),
-                    'min': rolling_corr.min(),
-                    'max': rolling_corr.max(),
-                    'negative_pct': np.array((rolling_corr < 0)).mean() * 100,
-                    'missing_pct': rolling_corr.isna().mean() * 100
-                }
-                stability_metrics[pair] = metrics
-
-            return pd.DataFrame(stability_metrics).T
-
-        except Exception as e:
-            raise CalculationError(f"Failed to analyze correlation stability: {str(e)}")
-
-    @staticmethod
-    def _validate_pair_name(asset1: str, asset2: str) -> str:
-        """Create a unique and safe pair identifier."""
-        return f"{min(asset1, asset2)}|||{max(asset1, asset2)}"
-
-    def get_pair_rolling_correlation(self, asset1: str, asset2: str) -> pd.Series:
-        """Get rolling correlation for a specific pair."""
-        pair_name = self._validate_pair_name(asset1, asset2)
-        if self.rolling_corr_ is None:
-            self.calculate_rolling_correlation()
-        return self.rolling_corr_.get(pair_name)
-
-    def determine_correlation_significance(self,
-                                   correlation_type: str = 'pearson',
-                                   alpha: float = 0.05, method: str = 'bonferroni') -> pd.DataFrame:
-        """
-        Test significance of correlations.
-
-        Args:
-            correlation_type (str): 'pearson' or 'partial'
-            alpha (float): Significance level
-
-        Returns:
-            pd.DataFrame: P-values for correlation tests
-
-        Raises:
-            ValueError: If invalid correlation type
-            CalculationError: If calculation fails
-        """
-        try:
-            if correlation_type == 'pearson':
-                if self.pearson_corr_ is None:
-                    self.calculate_pearson_correlation()
-                corr_matrix = self.pearson_corr_
-            elif correlation_type == 'partial':
-                if self.partial_corr_ is None:
-                    self.calculate_partial_correlation()
-                corr_matrix = self.partial_corr_
-            else:
-                raise ValueError("correlation_type must be 'pearson' or 'partial'")
-
-            n = len(self.returns)
-            pvalues = pd.DataFrame(
-                np.zeros_like(corr_matrix),
-                index=corr_matrix.index,
-                columns=corr_matrix.columns
-            )
-
-            corr_values = corr_matrix.values
-            denom = np.sqrt(1 - corr_values**2)
-            denom[denom == 0] = np.inf
-
-            t_stat = corr_values * np.sqrt((n - 2) / denom)
-            pvalues_array = 2 * (1 - stats.t.cdf(np.abs(t_stat), n - 2))
-
-            pvalues.values[:] = pvalues_array
-            np.fill_diagonal(pvalues.values, 1.0)
-
-            if method == 'bonferroni':
-                reject, pvals_corrected, _, _ = multipletests(pvalues, alpha=alpha, method='bonferroni')
-            elif method == 'holm':
-                reject, pvals_corrected, _, _ = multipletests(pvalues, alpha=alpha, method='holm')
-            elif method == 'fdr_bh':
-                reject, pvals_corrected, _, _ = multipletests(pvalues, alpha=alpha, method='fdr_bh')
-            else:
-                raise ValueError(f"Unsupported multiple testing correction: {method}")
-
-            return pvals_corrected
-
-        except Exception as e:
-            raise CalculationError(f"Failed to test correlation significance: {str(e)}")
-
-    def plot_correlation_matrix(self,
-                                correlation_type: str = 'pearson',
-                                title: Optional[str] = None,
-                                colormap: Optional[str] = None,
-                                size: Optional[Tuple[int, int]] = None) -> go.Figure:
-        """Plot correlation matrix heatmap with proper title."""
-        try:
-            if correlation_type == 'pearson':
-                if self.pearson_corr_ is None:
-                    self.calculate_pearson_correlation()
-                corr_matrix = self.pearson_corr_
-            elif correlation_type == 'partial':
-                if self.partial_corr_ is None:
-                    self.calculate_partial_correlation()
-                corr_matrix = self.partial_corr_
-            else:
-                raise ValueError("correlation_type must be 'pearson' or 'partial'")
-
-            if len(corr_matrix.columns) > self.config.MAX_ASSETS_DISPLAY:
-                warnings.warn(
-                    f"Large number of assets ({len(corr_matrix.columns)}). "
-                    f"Consider reducing for better visualization."
-                )
-
-            size = size or (1000, 1000)
-
-            fig = go.Figure(data=go.Heatmap(
-                z=corr_matrix,
-                x=corr_matrix.columns,
-                y=corr_matrix.columns,
-                colorscale=colormap or 'RdBu',
-                zmid=0,
-                showscale=True
-            ))
-
-            display_title = title or f"{correlation_type.capitalize()} Correlation Matrix"
-
-            fig.update_layout(
-                title=display_title,
-                xaxis_title="Assets",
-                yaxis_title="Assets",
-                width=size[0],
-                height=size[1],
-                xaxis={'tickangle': 45}
-            )
-
-            return fig
-
-        except Exception as e:
-            raise CalculationError(f"Failed to plot correlation matrix: {str(e)}")
-
-    def plot_rolling_correlations(self,
-                                pairs: Optional[List[Tuple[str, str]]] = None,
-                                window: Optional[int] = None,
-                                size: Optional[Tuple[int, int]] = None) -> go.Figure:
-        """
-        Plot rolling correlations for specified pairs.
-
-        Args:
-            pairs: List of asset pairs to plot
-            window: Rolling window size
-            size: Figure size (width, height)
-
-        Returns:
-            go.Figure: Plotly figure object
-        """
-        try:
-            if self.rolling_corr_ is None or (window and self.rolling_window_ != window):
-                self.calculate_rolling_correlation(window)
-
-            if pairs is None:
-                highly_corr = self.get_highly_correlated_pairs()
-                pairs = [(row['asset1'], row['asset2'])
-                        for _, row in highly_corr.head().iterrows()]
-
-            size = size or (1200, 600)
-            fig = go.Figure()
-
-            for asset1, asset2 in pairs:
-                pair_name = validate_pair_name(asset1, asset2)
-                if pair_name not in self.rolling_corr_:
-                    logger.warning(f"No rolling correlation data for pair: {asset1}-{asset2}")
-                    continue
-
-                rolling_corr = self.rolling_corr_[pair_name]
-
-                fig.add_trace(go.Scatter(
-                    x=rolling_corr.index,
-                    y=rolling_corr,
-                    name=f"{asset1} - {asset2}",
-                    mode='lines'
-                ))
-
-            fig.update_layout(
-                title=f"Rolling Correlations (Window: {self.rolling_window_} days)",
-                xaxis_title="Date",
-                yaxis_title="Correlation",
-                showlegend=True,
-                width=size[0],
-                height=size[1],
-                yaxis_range=[-1, 1]
-            )
-
-            return fig
-
-        except Exception as e:
-            raise CalculationError(f"Failed to plot rolling correlations: {str(e)}")
-
-
-class DataLoader:
-    """Class for loading and preprocessing financial data."""
-
-    def __init__(self, data_dir: Union[str, Path]):
-        """
-        Initialize data loader.
-
-        Args:
-            data_dir: Directory containing data files
-        """
-        self.data_dir = Path(data_dir)
-        if not self.data_dir.exists():
-            raise ValueError(f"Data directory does not exist: {data_dir}")
-
-    def load_stock_data(self,
-                       required_columns: List[str] = None,
-                       min_history: int = 252) -> pd.DataFrame:
-        """
-        Load and preprocess stock price data.
-
-        Args:
-            required_columns: List of required columns in CSV files
-            min_history: Minimum number of days required for inclusion
-
-        Returns:
-            pd.DataFrame: Processed price data
-
-        Raises:
-            ValueError: If no valid data is found
-        """
-        required_columns = required_columns or ['Date', 'Close']
-        logger.info(f"Loading stock data from {self.data_dir}")
-
-        csv_files = list(self.data_dir.glob('*.csv'))
-        if not csv_files:
-            raise ValueError(f"No CSV files found in {self.data_dir}")
-
-        prices_dict = {}
-        errors = []
-
-        for file in csv_files:
-            try:
-                if file.name == 'combined_prices.csv':
-                    continue
-
-                ticker = file.stem
-                df = pd.read_csv(file)
-
-                missing_cols = set(required_columns) - set(df.columns)
-                if missing_cols:
-                    errors.append(f"Missing columns in {file.name}: {missing_cols}")
-                    continue
-
-                df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                df = df.dropna(subset=['Date'])
-                df.set_index('Date', inplace=True)
-
-                close_prices = pd.to_numeric(df['Close'], errors='coerce')
-                if close_prices.isna().any():
-                    errors.append(f"Non-numeric values in Close column of {file.name}")
-
-                if len(close_prices) < min_history:
-                    errors.append(f"Insufficient history for {ticker}: {len(close_prices)} days")
-                    continue
-
-                prices_dict[ticker] = close_prices
-
-            except Exception as e:
-                errors.append(f"Error processing {file.name}: {str(e)}")
-
-        if not prices_dict:
-            raise ValueError("No valid price data loaded. Errors: " + "\n".join(errors))
-
-        prices_df = pd.DataFrame(prices_dict)
-
-        missing_pct = prices_df.isnull().mean()
-        if (missing_pct > 0.1).any():
-            warnings.warn("Some assets have >10% missing data")
-
-        prices_df = prices_df.ffill().bfill()
-
-        prices_df = prices_df.dropna(axis=1)
-
-        logger.info(f"Successfully loaded data for {len(prices_df.columns)} assets")
-        if errors:
-            logger.warning("Errors encountered:\n" + "\n".join(errors))
-
-        return prices_df
-
-
-def run_correlation_analysis(prices_df: pd.DataFrame,
-                           output_dir: Union[str, Path],
-                           config: Optional[CorrelationConfig] = None) -> None:
-    """
-    Run comprehensive correlation analysis and save results.
-
-    Args:
-        prices_df: DataFrame of price data
-        output_dir: Directory to save results
-        config: Configuration parameters
-    """
-    output_dir = Path(output_dir)
-    plots_dir = output_dir / "plots"
-    results_dir = output_dir / "results"
-
-    for directory in [output_dir, plots_dir, results_dir]:
-        directory.mkdir(parents=True, exist_ok=True)
-
-    returns = prices_df.pct_change().dropna()
-
-    analyzer = CorrelationAnalyzer(returns, config)
-
-    try:
-        pearson_corr = analyzer.calculate_pearson_correlation()
-        partial_corr = analyzer.calculate_partial_correlation()
-        rolling_corr = analyzer.calculate_rolling_correlation()
-
-        pearson_fig = analyzer.plot_correlation_matrix('pearson')
-        partial_fig = analyzer.plot_correlation_matrix('partial')
-
-        pearson_fig.write_html(plots_dir / "pearson_correlation.html")
-        partial_fig.write_html(plots_dir / "partial_correlation.html")
-
-        correlation_results = {}
-        for threshold_name, threshold in config.CORRELATION_THRESHOLDS.items():
-            pearson_pairs = analyzer.get_highly_correlated_pairs('pearson', threshold)
-            partial_pairs = analyzer.get_highly_correlated_pairs('partial', threshold)
-
-            correlation_results[f'pearson_{threshold_name}'] = pearson_pairs
-            correlation_results[f'partial_{threshold_name}'] = partial_pairs
-
-            pearson_pairs.to_csv(results_dir / f"pearson_pairs_{threshold_name}.csv")
-            partial_pairs.to_csv(results_dir / f"partial_pairs_{threshold_name}.csv")
-
-        stability = analyzer.analyze_correlation_stability()
-        stability.to_csv(results_dir / "correlation_stability.csv")
-
-        for threshold_name, pairs_df in correlation_results.items():
-            if len(pairs_df) > 0:
-                top_pairs = [(row['asset1'], row['asset2'])
-                            for _, row in pairs_df.head().iterrows()]
-                rolling_fig = analyzer.plot_rolling_correlations(top_pairs)
-                rolling_fig.write_html(plots_dir / f"rolling_correlations_{threshold_name}.html")
-
-        pvalues_pearson = pd.DataFrame(
-            analyzer.determine_correlation_significance('pearson'),
-            index=analyzer.returns.columns,
-            columns=analyzer.returns.columns
+        corr_matrix = self.calculate_correlation(method)
+        fig = go.Figure(data=go.Heatmap(
+            z=corr_matrix.values,
+            x=corr_matrix.columns,
+            y=corr_matrix.columns,
+            colorscale='RdBu',
+            zmid=0
+        ))
+        fig.update_layout(
+            title=title or f"{method.capitalize()} Correlation Matrix",
+            height=800,
+            width=800
         )
-        pvalues_partial = pd.DataFrame(
-            analyzer.determine_correlation_significance('partial'),
-            index=analyzer.returns.columns,
-            columns=analyzer.returns.columns
+        return fig
+
+    def plot_clustered_correlation_matrix(self, method: str = 'pearson', title: Optional[str] = None):
+        """
+        Generates a clustered heatmap to reveal underlying correlation structures.
+        """
+        logger.info(f"Generating clustered heatmap for {method} correlation.")
+        corr_matrix = self.calculate_correlation(method)
+
+        cg = sns.clustermap(
+            corr_matrix,
+            cmap='RdBu_r',
+            vmin=-1,
+            vmax=1,
+            annot=False,
+            figsize=(12, 12)
         )
-
-        pvalues_pearson.to_csv(results_dir / "pearson_pvalues.csv")
-        pvalues_partial.to_csv(results_dir / "partial_pvalues.csv")
-
-        _write_summary_report(
-            analyzer=analyzer,
-            output_dir=output_dir,
-            correlation_results=correlation_results,
-            pvalues_pearson=pvalues_pearson,
-            pvalues_partial=pvalues_partial,
-            stability=stability
-        )
-
-    except Exception as e:
-        logger.error(f"Error in correlation analysis: {str(e)}")
-        raise
-
-
-def _write_summary_report(analyzer: CorrelationAnalyzer,
-                          output_dir: Path,
-                          correlation_results: Dict,
-                          pvalues_pearson: pd.DataFrame,
-                          pvalues_partial: pd.DataFrame,
-                          stability: pd.DataFrame) -> None:
-    """Write summary report of correlation analysis."""
-    with open(output_dir / "correlation_analysis.txt", "w", encoding="utf-8") as f:
-        f.write("Correlation Analysis Summary\n")
-        f.write("==========================\n\n")
-
-        f.write("Overall Statistics:\n")
-        f.write("-" * 20 + "\n")
-        f.write(f"Number of assets analyzed: {len(analyzer.returns.columns)}\n")
-        f.write(f"Time period: {analyzer.returns.index[0]} to {analyzer.returns.index[-1]}\n")
-        f.write(f"Number of observations: {len(analyzer.returns)}\n\n")
-
-        f.write("\nPearson Correlation Analysis:\n")
-        f.write("-" * 30 + "\n")
-        f.write(f"Number of significant pairs (p < 0.05): "
-                f"{np.array((pvalues_pearson < 0.05)).sum().sum() // 2}\n")
-
-        for threshold_name, threshold in analyzer.config.CORRELATION_THRESHOLDS.items():
-            pairs_df = correlation_results[f'pearson_{threshold_name}']
-            f.write(f"\n{threshold_name.title()} Correlation Pairs (≥ {threshold}):\n")
-            f.write(f"Number of pairs: {len(pairs_df)}\n")
-            if len(pairs_df) > 0:
-                f.write("Top 5 Most Correlated Pairs:\n")
-                for _, row in pairs_df.head().iterrows():
-                    f.write(f"  {row['asset1']} - {row['asset2']}: {row['correlation']:.3f}\n")
-
-        f.write("\nPartial Correlation Analysis:\n")
-        f.write("-" * 30 + "\n")
-        f.write(f"Number of significant pairs (p < 0.05): "
-                f"{np.array((pvalues_partial < 0.05)).sum().sum() // 2}\n")
-
-        for threshold_name, threshold in analyzer.config.CORRELATION_THRESHOLDS.items():
-            pairs_df = correlation_results[f'partial_{threshold_name}']
-            f.write(f"\n{threshold_name.title()} Partial Correlation Pairs (≥ {threshold}):\n")
-            f.write(f"Number of pairs: {len(pairs_df)}\n")
-            if len(pairs_df) > 0:
-                f.write("Top 5 Most Correlated Pairs:\n")
-                for _, row in pairs_df.head().iterrows():
-                    f.write(f"  {row['asset1']} - {row['asset2']}: {row['correlation']:.3f}\n")
-
-        f.write("\nCorrelation Stability Analysis:\n")
-        f.write("-" * 30 + "\n")
-        f.write("Summary Statistics:\n")
-        f.write(f"Average correlation stability: {stability['mean'].mean():.3f}\n")
-        f.write(f"Average correlation volatility: {stability['std'].mean():.3f}\n")
-        f.write(f"Average negative correlation percentage: {stability['negative_pct'].mean():.1f}%\n")
-
-        stable_pairs = stability.sort_values('std')
-        f.write("\nMost Stable Correlation Pairs:\n")
-        for idx in stable_pairs.head().index:
-            stats = stable_pairs.loc[idx]
-            f.write(f"  {idx}: mean={stats['mean']:.3f}, std={stats['std']:.3f}\n")
-
-
-if __name__ == "__main__":
-    try:
-        data_dir = Path(r'C:\Users\arnav\Downloads\pairs_trading_system\data\raw')
-        output_dir = Path("correlation_analysis")
-
-        config = CorrelationConfig()
-
-        loader = DataLoader(data_dir)
-        prices_df = loader.load_stock_data()
-
-        run_correlation_analysis(prices_df, output_dir, config)
-
-        logger.info("Correlation analysis completed successfully")
-    except Exception as e:
-        raise
+        plt.setp(cg.ax_heatmap.xaxis.get_majorticklabels(), rotation=90)
+        cg.fig.suptitle(title or f'Clustered {method.capitalize()} Correlation Matrix')

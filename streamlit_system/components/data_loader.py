@@ -1,386 +1,86 @@
-import traceback
-import pandas as pd
-from typing import List
-from datetime import datetime, timedelta
-import plotly.graph_objects as go
 import streamlit as st
-
+import pandas as pd
+from datetime import datetime, timedelta
 from src.data.downloader import DataDownloader
 from src.data.preprocessor import Preprocessor
 from src.data.database import DatabaseManager
-from src.utils.validation import validate_dataframe
-from config.logging_config import logger
 
 
-class EnhancedDataLoader:
-    """Enhanced data loading component with comprehensive session state management."""
+def render_data_loader_page():
+    """Renders the UI for loading, downloading, and preprocessing data."""
+    st.title("📂 Data Loader")
 
-    def __init__(self):
-        """Initialize the data loader with required components."""
-        self.preprocessor = Preprocessor()
-        self.db_manager = DatabaseManager()
-        self.downloader = DataDownloader()
-        self._initialize_session_state()
+    downloader = DataDownloader()
+    preprocessor = Preprocessor()
+    db_manager = DatabaseManager()
 
-    def _initialize_session_state(self):
-        """Initialize required session state variables."""
-        if 'historical_data' not in st.session_state:
-            st.session_state.historical_data = pd.DataFrame()
-        if 'data_loading_error' not in st.session_state:
-            st.session_state.data_loading_error = None
-        if 'data_loading_success' not in st.session_state:
-            st.session_state.data_loading_success = False
+    source = st.radio("Select Data Source", ["Download from API", "Upload CSV", "Load from Database"])
 
-    def render(self):
-        """Render the enhanced data loading interface."""
-        st.header("Data Loading and Preprocessing")
+    if source == "Download from API":
+        st.subheader("Download Market Data via API")
 
-        tab1, tab2, tab3 = st.tabs(["File Upload", "Direct Download", "Database Query"])
-
-        with tab1:
-            self._render_file_upload()
-
-        with tab2:
-            self._render_direct_download()
-
-        with tab3:
-            self._render_database_query()
-
-        if st.session_state.data_loading_error:
-            st.error(st.session_state.data_loading_error)
-        if st.session_state.data_loading_success:
-            st.success("Data loaded successfully!")
-
-    def _render_file_upload(self):
-        """Handle file uploads with improved error handling and state management."""
-        st.subheader("Upload Data Files")
-
-        uploaded_files = st.file_uploader(
-            "Upload CSV files (one per ticker)",
-            type="csv",
-            accept_multiple_files=True
-        )
-
-        if uploaded_files:
-            try:
-                with st.spinner("Processing uploaded files..."):
-                    dfs = []
-                    for file in uploaded_files:
-                        df = pd.read_csv(file)
-                        df['Symbol'] = file.name.split('.')[0]
-                        dfs.append(df)
-
-                    combined_df = pd.concat(dfs, ignore_index=True)
-                    processed_df = self._process_data(combined_df)
-
-                    self._store_data(processed_df)
-
-                    st.session_state.data_loading_success = True
-                    st.session_state.data_loading_error = None
-
-                    self._display_data_summary(processed_df)
-
-            except Exception as e:
-                st.session_state.data_loading_error = f"Error processing files: {str(e)}"
-                st.session_state.data_loading_success = False
-
-    def _render_direct_download(self):
-        """Handle direct data downloads with improved state management."""
-        st.subheader("Download Market Data")
-
-        ticker_input_method = st.radio(
-            "Ticker Input Method",
-            ["Manual Input", "CSV Upload", "NASDAQ 100", "S&P 500"]
-        )
-
-        tickers = self._handle_ticker_input(ticker_input_method)
+        symbols_input = st.text_input("Enter symbols (comma-separated)", "AAPL,MSFT,GOOG,GOOGL,NVDA,TSLA")
 
         col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input(
-                "Start Date",
-                datetime.now() - timedelta(days=365 * 2),
-                key='Start Date Direct Download'
-            )
-        with col2:
-            end_date = st.date_input(
-                "End Date",
-                datetime.now(),
-                key='End Date Direct Download'
-            )
+        start_date = col1.date_input("Start Date", datetime.now() - timedelta(days=5 * 365))
+        end_date = col2.date_input("End Date", datetime.now())
 
-        if tickers:
-            col1, col2 = st.columns(2)
-            with col1:
-                batch_size = st.number_input(
-                    "Download Batch Size",
-                    min_value=1,
-                    max_value=100,
-                    value=min(50, len(tickers))
-                )
-            with col2:
-                include_validation = st.checkbox(
-                    "Include Data Validation",
-                    value=True
-                )
-
-            if st.button("Download Data"):
-                self._handle_data_download(
-                    tickers,
-                    start_date,
-                    end_date,
-                    batch_size,
-                    include_validation
-                )
-
-    @staticmethod
-    def _get_sp500_tickers() -> List[str]:
-        """Get S&P 500 tickers from SSGA website."""
-        try:
-            url = 'https://www.ssga.com/us/en/intermediary/etfs/library-content/products/fund-data/etfs/us/holdings-daily-us-en-spy.xlsx'
-            holdings = pd.read_excel(url, engine='openpyxl', skiprows=4)
-
-            if 'Ticker' in holdings.columns:
-                tickers = holdings['Ticker'].dropna().tolist()
-            elif 'Symbol' in holdings.columns:
-                tickers = holdings['Symbol'].dropna().tolist()
-            else:
-                potential_ticker_cols = [col for col in holdings.columns
-                                         if any(x in col.lower() for x in ['ticker', 'symbol'])]
-                if potential_ticker_cols:
-                    tickers = holdings[potential_ticker_cols[0]].dropna().tolist()
-                else:
-                    raise ValueError("Could not find ticker column in S&P 500 data")
-
-            tickers = [str(ticker).strip().upper() for ticker in tickers]
-            tickers = [ticker for ticker in tickers if ticker.isalnum()]
-
-            if not tickers:
-                raise ValueError("No valid tickers found in S&P 500 data")
-
-            return tickers
-        except Exception as e:
-            st.error(f"Error fetching S&P 500 components: {str(e)}")
-            logger.error(f"S&P 500 fetch error: {str(e)}", exc_info=True)
-            return []
-
-    def _handle_ticker_input(self, input_method: str) -> List[str]:
-        """Handle different ticker input methods."""
-        tickers = []
-
-        if input_method == "Manual Input":
-            tickers_input = st.text_input(
-                "Enter ticker symbols (comma-separated)",
-                "AAPL,MSFT,GOOGL"
-            )
-            tickers = [t.strip() for t in tickers_input.split(",")]
-
-        elif input_method == "CSV Upload":
-            ticker_file = st.file_uploader(
-                "Upload CSV file with ticker symbols",
-                type="csv"
-            )
-            if ticker_file:
-                try:
-                    ticker_df = pd.read_csv(ticker_file)
-                    ticker_col = next(
-                        (col for col in ticker_df.columns
-                         if col.lower() in ['ticker', 'symbol', 'tickers', 'symbols']),
-                        None
-                    )
-                    if ticker_col:
-                        tickers = ticker_df[ticker_col].dropna().unique().tolist()
-                except Exception as e:
-                    st.error(f"Error reading ticker CSV: {str(e)}")
-
-        elif input_method == "NASDAQ 100":
-            try:
-                with st.spinner("Fetching NASDAQ 100 components..."):
-                    tickers = self.downloader.get_nasdaq100_components()
-            except Exception as e:
-                st.error(f"Error fetching NASDAQ 100 components: {str(e)}")
-
-        else:
-            try:
-                with st.spinner("Fetching S&P 500 components..."):
-                    tickers = self._get_sp500_tickers()
-            except Exception as e:
-                st.error(f"Error fetching S&P 500 components: {str(e)}")
-
-        return tickers
-
-    def _handle_data_download(self, tickers: List[str], start_date: datetime, end_date: datetime, batch_size: int,
-                              include_validation: bool):
-        """Handle the data download process with proper state management."""
-        try:
-            with st.spinner("Downloading market data..."):
-                df = self.downloader.download_historical_data(
-                    tickers,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
-
-                if df is not None and not df.empty:
-                    if isinstance(df.index, pd.DatetimeIndex):
-                        df = df.reset_index()
-                        df.rename(columns={'index': 'Date'}, inplace=True)
-
-                    df.columns = [col.strip() for col in df.columns]
-
-                    column_mapping = {
-                        'adj close': 'Adj_Close',
-                        'adjusted close': 'Adj_Close',
-                        'adjusted_close': 'Adj_Close',
-                        'datetime': 'Date',
-                        'time': 'Date'
-                    }
-                    df.rename(columns=column_mapping, inplace=True)
-
-                    if include_validation:
-                        df = self._process_data(df)
-
-                    self._store_data(df)
-                    st.session_state.data_loading_success = True
-                    st.session_state.data_loading_error = None
-                    self._display_data_summary(df)
-                else:
-                    st.session_state.data_loading_error = "No data was downloaded. Please check your inputs."
-                    st.session_state.data_loading_success = False
-
-        except Exception as e:
-            st.session_state.data_loading_error = f"Error downloading data: {str(e)}"
-            st.session_state.data_loading_success = False
-            logger.error(f"Download error: {str(e)}", exc_info=True)
-
-    def _render_database_query(self):
-        """Handle database queries with improved state management."""
-        st.subheader("Query Historical Data")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            ticker_filter = st.text_input(
-                "Filter by tickers (comma-separated, empty for all)",
-                ""
-            )
-            min_date = st.date_input(
-                "Start Date",
-                datetime.now() - timedelta(days=365),
-                key='Start Date Database Query'
-            )
-
-        with col2:
-            max_date = st.date_input(
-                "End Date",
-                datetime.now(),
-                key='End Date Database Query'
-            )
-
-        if st.button("Query Database"):
-            try:
-                with st.spinner("Querying database..."):
-                    tickers = [t.strip() for t in ticker_filter.split(",")] if ticker_filter else None
-
-                    df = pd.DataFrame()
-                    for ticker in (tickers or [None]):
-                        ticker_df = self.db_manager.fetch_historical_data(
-                            ticker=ticker,
-                            start_date=min_date,
-                            end_date=max_date
-                        )
-                        if not ticker_df.empty:
-                            df = pd.concat([df, ticker_df])
-
+        if st.button("Download Data"):
+            symbols = [s.strip().upper() for s in symbols_input.split(',')]
+            if symbols:
+                with st.spinner(f"Downloading data for {len(symbols)} symbols..."):
+                    df = downloader.download_historical_data(symbols, start_date, end_date)
                     if not df.empty:
-                        processed_df = self._process_data(df)
-                        self._store_data(processed_df)
-                        self._display_data_summary(processed_df)
-
-                        st.session_state.data_loading_success = True
-                        st.session_state.data_loading_error = None
+                        st.session_state.historical_data = df
+                        st.success(f"Successfully downloaded {len(df)} rows.")
+                        st.dataframe(df.head())
                     else:
-                        st.session_state.data_loading_error = "No data found for the specified criteria."
-                        st.session_state.data_loading_success = False
+                        st.error("Failed to download data. Check symbols and date range.")
 
-            except Exception as e:
-                st.session_state.data_loading_error = f"Database query error: {str(e)}"
-                st.session_state.data_loading_success = False
+    elif source == "Upload CSV":
+        st.subheader("Upload Historical Data")
+        uploaded_files = st.file_uploader("Upload one or more CSV files", accept_multiple_files=True, type="csv")
+        if uploaded_files:
+            dfs = []
+            for file in uploaded_files:
+                df = pd.read_csv(file)
+                if 'Symbol' not in df.columns and 'symbol' not in df.columns:
+                    df['Symbol'] = file.name.split('.')[0].upper()
+                dfs.append(df)
 
-    def _process_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Process raw data with validation and cleaning."""
-        if not validate_dataframe(df, methods=['missing', 'dtype']):
-            st.warning("Data validation warnings detected. See logs for details.")
+            combined_df = pd.concat(dfs, ignore_index=True)
+            st.session_state.historical_data = combined_df
+            st.success(f"Successfully loaded {len(combined_df)} rows from {len(uploaded_files)} files.")
+            st.dataframe(combined_df.head())
 
-        df = self.preprocessor.clean_data(df)
-        # df = self.preprocessor.normalize_data(df, method="z-score")
-        df = self.preprocessor.handle_outliers(df)
+    elif source == "Load from Database":
+        st.subheader("Load Data from Local Database")
+        if st.button("Load All Data"):
+            with st.spinner("Querying database..."):
+                df = db_manager.fetch_historical_data()
+                if not df.empty:
+                    st.session_state.historical_data = df
+                    st.success(f"Successfully loaded {len(df)} rows from the database.")
+                    st.dataframe(df.head())
+                else:
+                    st.warning("No data found in the database.")
 
-        return df
+    if not st.session_state.historical_data.empty:
+        st.markdown("---")
+        st.subheader("Data Preprocessing")
 
-    def _store_data(self, df: pd.DataFrame):
-        """Store processed data in session state and database."""
-        if df is None or df.empty:
-            raise ValueError("Cannot store empty DataFrame")
+        with st.spinner("Cleaning data..."):
+            cleaned_df = preprocessor.clean_data(st.session_state.historical_data)
 
-        required_columns = ['Date', 'Symbol', 'Open', 'High', 'Low', 'Close', 'Adj_Close', 'Volume']
-        for col in required_columns:
-            if col not in df.columns:
-                if col in ['Open', 'High', 'Low', 'Close']:
-                    df[col] = df['Adj_Close']
-                elif col == 'Volume':
-                    df[col] = 0
+        st.write("Outlier Handling (Winsorizing):")
+        if st.checkbox("Apply Outlier Handling", value=True):
+            with st.spinner("Handling outliers..."):
+                cleaned_df = preprocessor.handle_outliers(cleaned_df)
 
-        df['Date'] = pd.to_datetime(df['Date'])
+        if st.button("Save Processed Data to Session"):
+            st.session_state.historical_data = cleaned_df
 
-        df = df.sort_values(['Symbol', 'Date'])
+            pivot_prices = cleaned_df.pivot(index='Date', columns='Symbol', values='Adj_Close').ffill().bfill()
+            st.session_state.pivot_prices = pivot_prices
 
-        st.session_state.historical_data = df.copy()
-
-        for ticker in df['Symbol'].unique():
-            ticker_data = df[df['Symbol'] == ticker].copy()
-            self.db_manager.insert_historical_data(ticker, ticker_data)
-
-    def _display_data_summary(self, df: pd.DataFrame):
-        """Display comprehensive data summary with visualizations."""
-        st.subheader("Data Summary")
-
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Number of Tickers", len(df['Symbol'].unique()))
-        col2.metric("Date Range", f"{df['Date'].min():%Y-%m-%d} to {df['Date'].max():%Y-%m-%d}")
-        col3.metric("Total Records", len(df))
-
-        fig = go.Figure()
-        for ticker in df['Symbol'].unique()[:5]:
-            ticker_data = df[df['Symbol'] == ticker]
-            fig.add_trace(go.Scatter(
-                x=ticker_data['Date'],
-                y=ticker_data['Adj_Close'],
-                name=ticker,
-                mode='lines'
-            ))
-
-        fig.update_layout(
-            title="Sample Price Data",
-            xaxis_title="Date",
-            yaxis_title="Adjusted Close Price",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig)
-
-        st.subheader("Data Quality Metrics")
-        quality_metrics = self._calculate_quality_metrics(df)
-        st.dataframe(quality_metrics)
-
-    def _calculate_quality_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate data quality metrics per ticker."""
-        metrics = []
-        df = df.copy()
-        for ticker in df['Symbol'].unique():
-            ticker_data = df[df['Symbol'] == ticker]
-            metrics.append({
-                'Ticker': ticker,
-                'Missing Values (%)': (ticker_data.isnull().sum().sum() / len(ticker_data)) * 100,
-                'Trading Days': len(ticker_data),
-                'Price Range': f"{ticker_data['Adj_Close'].min():.2f} - {ticker_data['Adj_Close'].max():.2f}",
-                'Avg Daily Volume': ticker_data['Volume'].mean()
-            })
-        return pd.DataFrame(metrics)
+            st.success("Data has been cleaned and is ready for analysis.")
