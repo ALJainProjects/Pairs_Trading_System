@@ -3,7 +3,7 @@ import numpy as np
 from statsmodels.tsa.stattools import coint, adfuller
 from statsmodels.regression.linear_model import OLS
 # Corrected import for add_constant
-from statsmodels.tools.add_constant import add_constant
+from statsmodels.tools.tools import add_constant
 from typing import List, Tuple, Dict, Optional, Union
 from config.logging_config import logger  # Assuming this is configured
 from statsmodels.tsa.vector_ar.vecm import coint_johansen  # For Johansen test

@@ -10,4 +10,5 @@ It includes statistical models_data, machine learning models_data, and deep lear
 # Importing necessary classes and functions for easier access
 from .statistical import StatisticalModel
 from .machine_learning import MachineLearningModel
-from .deep_learning import DeepLearningModel
+from .deep_learning import *
+from base_model import *

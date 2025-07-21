@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from statsmodels.tsa.stattools import coint, adfuller
 from statsmodels.regression.linear_model import OLS
-from statsmodels.tools.add_constant import add_constant
+from statsmodels.tools.tools import add_constant
 from typing import Tuple, Optional, Dict, List, Union
 from config.logging_config import logger
 

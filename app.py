@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 
 # Import the refactored UI components
-from components.data_loader import render_data_loader_page
-from components.pair_analyzer import render_pair_analyzer_page
-from components.strategy_builder import render_strategy_builder_page
-from components.optimization import render_optimization_page
+from streamlit_system.components.data_loader import render_data_loader_page
+from streamlit_system.components.pair_analyzer import render_pair_analyzer_page
+from streamlit_system.components.strategy_builder import render_strategy_builder_page
+from streamlit_system.components.optimization import render_optimization_page
 
 
 def initialize_session_state():
