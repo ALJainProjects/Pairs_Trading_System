@@ -11,4 +11,4 @@ It includes statistical models_data, machine learning models_data, and deep lear
 from .statistical import StatisticalModel
 from .machine_learning import MachineLearningModel
 from .deep_learning import *
-from base_model import *
+from .base_model import *

@@ -83,7 +83,8 @@ class HistoricalDatabaseManager: # Renamed from DatabaseManager
             column_mapping = {
                 'adj close': 'adj_close',
                 'adjusted close': 'adj_close',
-                'adjusted_close': 'adj_close'
+                'adjusted_close': 'adj_close',
+                'close': 'adj_close',
             }
             df_to_insert.rename(columns=column_mapping, inplace=True)
 

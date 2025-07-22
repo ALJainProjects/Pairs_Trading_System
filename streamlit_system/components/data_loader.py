@@ -85,7 +85,21 @@ def render_data_loader_page():
     preprocessor = Preprocessor()
     # Instantiate HistoricalDatabaseManager
     db_manager = HistoricalDatabaseManager()
-    data_downloader = DataDownloader(source='yfinance')  # Initialize DataDownloader here
+
+    # --- Global Parallelization settings for DataDownloader (in sidebar) ---
+    st.sidebar.subheader("Download Settings")
+    use_parallel_download = st.sidebar.checkbox("Enable Parallel Downloading", value=True,
+                                                help="Download multiple symbols concurrently.")
+    num_parallel_workers = st.sidebar.slider("Number of Parallel Workers", 1, 20, 5,
+                                             help="Number of concurrent threads/processes for downloading. More workers might hit API rate limits faster.")
+
+    # Initialize DataDownloader with selected parallelization settings
+    # This instance will be used across all download sections
+    data_downloader = DataDownloader(
+        source='yfinance',  # Default source, can be overridden per section
+        use_parallel=use_parallel_download,
+        num_parallel_workers=num_parallel_workers
+    )
 
     source_type = st.radio("Select Data Source Type",
                            ["API Download", "Index Components Download", "File Upload", "Load from Database"])
@@ -94,11 +108,13 @@ def render_data_loader_page():
     if source_type == "API Download":
         st.subheader("Download Individual Symbols via API")
 
-        api_source = st.selectbox("Select API Provider", ["Yahoo Finance", "Alpaca", "Polygon.io"])
+        api_source = st.selectbox("Select API Provider", ["Yahoo Finance", "Alpaca", "Polygon.io"],
+                                  key="api_provider_individual")
         st.info(f"💡 Ensure your API keys for {api_source} are configured in your `.env` file "
                 f"(e.g., `ALPACA_API_KEY`, `POLYGON_API_KEY`).")
 
-        symbols_input = st.text_input("Enter symbols (comma-separated, e.g., AAPL,MSFT)", "AAPL,MSFT,GOOG,GOOGL")
+        symbols_input = st.text_input("Enter symbols (comma-separated, e.g., AAPL,MSFT)", "AAPL,MSFT,GOOG,GOOGL",
+                                      key="symbols_input_individual")
 
         col1, col2 = st.columns(2)
         # Set sensible default dates for download
@@ -117,9 +133,8 @@ def render_data_loader_page():
                 "Alpaca": "alpaca",
                 "Polygon.io": "polygon"
             }
-            # Use the already initialized data_downloader
-            data_downloader.provider = data_downloader._get_provider(
-                provider_map[api_source])  # Set the provider for the downloader
+            # Set the provider for the downloader based on selection
+            data_downloader.provider = data_downloader._get_provider(provider_map[api_source])
             symbols = [s.strip().upper() for s in symbols_input.split(',') if s.strip()]
 
             if symbols:
@@ -177,9 +192,17 @@ def render_data_loader_page():
             key="index_selection"
         )
 
+        api_source_index = st.selectbox(
+            "Select API Provider for Index Components Data:",
+            ["Yahoo Finance", "Alpaca", "Polygon.io"],
+            key="api_provider_index_components"
+        )
+        st.info(
+            f"💡 The chosen API provider ({api_source_index}) will be used to download the historical data for the selected index's constituents.")
+
         col1_idx, col2_idx = st.columns(2)
         default_end_date_idx = datetime.now().date()
-        default_start_date_idx = default_end_date_idx - timedelta(days=5 * 365)  # 5 years
+        default_start_date_idx = default_end_date_idx - timedelta(days=5 * 365)
         start_date_idx = col1_idx.date_input("Start Date", default_start_date_idx, key="idx_download_start_date")
         end_date_idx = col2_idx.date_input("End Date", default_end_date_idx, key="idx_download_end_date")
 
@@ -187,12 +210,21 @@ def render_data_loader_page():
             if start_date_idx >= end_date_idx:
                 st.error("Start Date must be before End Date.")
             else:
-                st.write(f"Downloading historical data for {selected_index_name} components...")
+                st.write(
+                    f"Downloading historical data for {selected_index_name} components using {api_source_index}...")
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
                 try:
-                    # Get the components based on selected index
+                    # Set the downloader's provider based on the selected API source for index components
+                    provider_map = {
+                        "Yahoo Finance": "yfinance",
+                        "Alpaca": "alpaca",
+                        "Polygon.io": "polygon"
+                    }
+                    data_downloader.provider = data_downloader._get_provider(provider_map[api_source_index])
+
+                    # Get the components list (this part still prioritizes local CSVs, then web scraping)
                     get_components_func = index_options[selected_index_name]
                     symbols_to_download = get_components_func()
 
@@ -203,59 +235,38 @@ def render_data_loader_page():
                         status_text.empty()
                         return
 
-                    status_text.text(f"Found {len(symbols_to_download)} symbols in {selected_index_name}.")
+                    status_text.text(
+                        f"Found {len(symbols_to_download)} symbols in {selected_index_name}. Starting download via {api_source_index}.")
                     logger.info(
-                        f"Attempting to download data for {len(symbols_to_download)} symbols from {selected_index_name}.")
+                        f"Attempting to download data for {len(symbols_to_download)} symbols from {selected_index_name} via {api_source_index}.")
 
                     # Clear previous data from session state before starting new download
                     st.session_state.historical_data = pd.DataFrame()
                     st.session_state.pivot_prices = pd.DataFrame()
 
-                    # Use a progress counter to update status
-                    download_status_container = st.empty()
-                    total_symbols_downloaded_this_session = 0
+                    # The download_and_store_data method now handles parallelization internally
+                    combined_df = data_downloader.download_and_store_data(
+                        symbols=symbols_to_download,
+                        start_date=start_date_idx,
+                        end_date=end_date_idx
+                    )
 
-                    # Download in chunks to manage memory and provide granular feedback
-                    chunk_size = 50  # Adjust based on API limits and performance
-                    total_symbols = len(symbols_to_download)
-                    total_chunks = (total_symbols + chunk_size - 1) // chunk_size
+                    # Update progress bar based on actual downloaded symbols count (if available from downloader)
+                    # For now, a simplified update to 100% on completion.
+                    if not combined_df.empty:
+                        total_symbols_downloaded_this_session = combined_df['Symbol'].nunique()
+                    else:
+                        total_symbols_downloaded_this_session = 0
 
-                    all_downloaded_dfs = []
+                    progress_bar.progress(1.0)  # Assume 100% if download completes without unhandled exception
 
-                    for i in range(total_chunks):
-                        start_idx = i * chunk_size
-                        end_idx = min((i + 1) * chunk_size, total_symbols)
-                        chunk_symbols = symbols_to_download[start_idx:end_idx]
-
-                        download_status_container.info(
-                            f"Downloading chunk {i + 1}/{total_chunks}: {len(chunk_symbols)} symbols ({start_idx + 1}-{end_idx}) from {selected_index_name}...")
-                        logger.info(
-                            f"Downloading chunk {i + 1}/{total_chunks} for {selected_index_name}: {len(chunk_symbols)} symbols.")
-
-                        try:
-                            df_chunk = data_downloader.download_and_store_data(
-                                symbols=chunk_symbols,
-                                start_date=start_date_idx,
-                                end_date=end_date_idx
-                            )
-                            if not df_chunk.empty:
-                                all_downloaded_dfs.append(df_chunk)
-                                total_symbols_downloaded_this_session += df_chunk['Symbol'].nunique()
-                        except Exception as chunk_e:
-                            download_status_container.warning(
-                                f"Error downloading chunk {i + 1}: {chunk_e}. Skipping this chunk.")
-                            logger.warning(
-                                f"Error in chunk download for {selected_index_name} (chunk {i + 1}): {chunk_e}")
-
-                        progress_bar.progress(min((i + 1) / total_chunks, 1.0))  # Update progress bar
-
-                    if all_downloaded_dfs:
-                        combined_df = pd.concat(all_downloaded_dfs, ignore_index=True)
-                        _validate_and_store_data(combined_df, f"{selected_index_name} Components")
+                    if not combined_df.empty:
+                        _validate_and_store_data(combined_df,
+                                                 f"{selected_index_name} Components via {api_source_index}")
                         st.success(
-                            f"Successfully downloaded and stored historical data for {total_symbols_downloaded_this_session} unique symbols from {selected_index_name} into the historical database!")
+                            f"Successfully downloaded and stored historical data for {total_symbols_downloaded_this_session} unique symbols from {selected_index_name} into the historical database using {api_source_index}!")
                         logger.info(
-                            f"Completed download for {selected_index_name}: {total_symbols_downloaded_this_session} unique symbols.")
+                            f"Completed download for {selected_index_name}: {total_symbols_downloaded_this_session} unique symbols via {api_source_index}.")
                     else:
                         st.warning(f"No data was downloaded for {selected_index_name} components.")
                         logger.warning(f"No data downloaded for {selected_index_name} components.")
@@ -265,8 +276,9 @@ def render_data_loader_page():
                     logger.exception(f"Error downloading {selected_index_name} components' data.")
                 finally:
                     progress_bar.empty()
-                    status_text.empty()  # Clear top status text
-                    download_status_container.empty()  # Clear chunk status text
+                    status_text.empty()
+                    # download_status_container was removed in the previous step, so no change needed here.
+
 
     # --- File Upload Section ---
     elif source_type == "File Upload":
@@ -293,7 +305,7 @@ def render_data_loader_page():
                         for col in df.columns]
                     df.columns = [
                         col.replace('Adj close', 'Adj_Close').replace('adj close', 'Adj_Close').replace('Adj_close',
-                                                                                                        'Adj_Close') for
+                                                                                                        'Adj_Close').replace('Close', 'Adj_Close') for
                         col in df.columns]  # Specific for Adj_Close
                     dfs.append(df)
                     st.success(f"Successfully read {file.name}.")
