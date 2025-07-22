@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-import logging  # Import logging to configure Streamlit's logger if needed
+import logging
 
 from src.data.downloader import DataDownloader
 from src.data.preprocessor import Preprocessor
@@ -85,12 +85,14 @@ def render_data_loader_page():
     preprocessor = Preprocessor()
     # Instantiate HistoricalDatabaseManager
     db_manager = HistoricalDatabaseManager()
+    data_downloader = DataDownloader(source='yfinance')  # Initialize DataDownloader here
 
-    source_type = st.radio("Select Data Source Type", ["API Download", "File Upload", "Load from Database"])
+    source_type = st.radio("Select Data Source Type",
+                           ["API Download", "Index Components Download", "File Upload", "Load from Database"])
 
-    # --- API Download Section ---
+    # --- API Download Section (Individual Symbols) ---
     if source_type == "API Download":
-        st.subheader("Download Market Data via API")
+        st.subheader("Download Individual Symbols via API")
 
         api_source = st.selectbox("Select API Provider", ["Yahoo Finance", "Alpaca", "Polygon.io"])
         st.info(f"💡 Ensure your API keys for {api_source} are configured in your `.env` file "
@@ -102,10 +104,10 @@ def render_data_loader_page():
         # Set sensible default dates for download
         default_end_date = datetime.now().date()
         default_start_date = default_end_date - timedelta(days=5 * 365)  # 5 years of data
-        start_date = col1.date_input("Start Date", default_start_date)
-        end_date = col2.date_input("End Date", default_end_date)
+        start_date = col1.date_input("Start Date", default_start_date, key="api_download_start_date")
+        end_date = col2.date_input("End Date", default_end_date, key="api_download_end_date")
 
-        if st.button(f"Download from {api_source}"):
+        if st.button(f"Download Selected Symbols from {api_source}"):
             # Clear previous data from session state to avoid mixing data
             st.session_state.historical_data = pd.DataFrame()
             st.session_state.pivot_prices = pd.DataFrame()
@@ -115,15 +117,16 @@ def render_data_loader_page():
                 "Alpaca": "alpaca",
                 "Polygon.io": "polygon"
             }
-            downloader = DataDownloader(source=provider_map[api_source])
+            # Use the already initialized data_downloader
+            data_downloader.provider = data_downloader._get_provider(
+                provider_map[api_source])  # Set the provider for the downloader
             symbols = [s.strip().upper() for s in symbols_input.split(',') if s.strip()]
 
             if symbols:
                 with st.spinner(
                         f"Downloading data from {api_source} and storing to DB... This may take a while for Polygon due to rate limits."):
                     try:
-                        # downloader.download_and_store_data handles storage to HistoricalDatabaseManager
-                        df = downloader.download_and_store_data(symbols, start_date, end_date)
+                        df = data_downloader.download_and_store_data(symbols, start_date, end_date)
                         _validate_and_store_data(df, f"API ({api_source})")
                     except Exception as e:
                         st.error(
@@ -139,7 +142,7 @@ def render_data_loader_page():
             st.session_state.historical_data = pd.DataFrame()
             st.session_state.pivot_prices = pd.DataFrame()
 
-            downloader = DataDownloader(source="polygon")
+            data_downloader.provider = data_downloader._get_provider("polygon")  # Set provider to Polygon
             symbols = [s.strip().upper() for s in symbols_input.split(',') if s.strip()]
             start_20_years = datetime.now().date() - timedelta(days=20 * 365)
             end_20_years = datetime.now().date()
@@ -148,13 +151,122 @@ def render_data_loader_page():
                 with st.spinner(
                         "Downloading 20 years of data from Polygon... This will take a long time due to API rate limits."):
                     try:
-                        df = downloader.download_and_store_data(symbols, start_20_years, end_20_years)
+                        df = data_downloader.download_and_store_data(symbols, start_20_years, end_20_years)
                         _validate_and_store_data(df, "Polygon 20-Year API")
                     except Exception as e:
                         st.error(f"Failed to download 20-year history from Polygon. Error: {e}.")
                         logger.error(f"Polygon 20-year download error: {e}")
             else:
                 st.warning("Please enter at least one symbol to download 20-year history.")
+
+    # --- NEW: Index Components Download Section ---
+    elif source_type == "Index Components Download":
+        st.subheader("Download Index Components Data")
+        st.info("💡 Select an index to download historical data for all its constituent symbols. "
+                "The system will first try to load components from local CSV files provided, then fall back to web scraping if not found.")
+
+        index_options = {
+            "NASDAQ 100": data_downloader.get_nasdaq100_components,
+            "S&P 500": data_downloader.get_sp500_components,
+            "Russell 2000": data_downloader.get_russell2000_components
+        }
+
+        selected_index_name = st.selectbox(
+            "Choose an Index to download components:",
+            list(index_options.keys()),
+            key="index_selection"
+        )
+
+        col1_idx, col2_idx = st.columns(2)
+        default_end_date_idx = datetime.now().date()
+        default_start_date_idx = default_end_date_idx - timedelta(days=5 * 365)  # 5 years
+        start_date_idx = col1_idx.date_input("Start Date", default_start_date_idx, key="idx_download_start_date")
+        end_date_idx = col2_idx.date_input("End Date", default_end_date_idx, key="idx_download_end_date")
+
+        if st.button(f"Download {selected_index_name} Components"):
+            if start_date_idx >= end_date_idx:
+                st.error("Start Date must be before End Date.")
+            else:
+                st.write(f"Downloading historical data for {selected_index_name} components...")
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                try:
+                    # Get the components based on selected index
+                    get_components_func = index_options[selected_index_name]
+                    symbols_to_download = get_components_func()
+
+                    if not symbols_to_download:
+                        st.warning(f"No symbols found for {selected_index_name}. Download aborted.")
+                        logger.warning(f"No symbols retrieved for {selected_index_name}.")
+                        progress_bar.empty()
+                        status_text.empty()
+                        return
+
+                    status_text.text(f"Found {len(symbols_to_download)} symbols in {selected_index_name}.")
+                    logger.info(
+                        f"Attempting to download data for {len(symbols_to_download)} symbols from {selected_index_name}.")
+
+                    # Clear previous data from session state before starting new download
+                    st.session_state.historical_data = pd.DataFrame()
+                    st.session_state.pivot_prices = pd.DataFrame()
+
+                    # Use a progress counter to update status
+                    download_status_container = st.empty()
+                    total_symbols_downloaded_this_session = 0
+
+                    # Download in chunks to manage memory and provide granular feedback
+                    chunk_size = 50  # Adjust based on API limits and performance
+                    total_symbols = len(symbols_to_download)
+                    total_chunks = (total_symbols + chunk_size - 1) // chunk_size
+
+                    all_downloaded_dfs = []
+
+                    for i in range(total_chunks):
+                        start_idx = i * chunk_size
+                        end_idx = min((i + 1) * chunk_size, total_symbols)
+                        chunk_symbols = symbols_to_download[start_idx:end_idx]
+
+                        download_status_container.info(
+                            f"Downloading chunk {i + 1}/{total_chunks}: {len(chunk_symbols)} symbols ({start_idx + 1}-{end_idx}) from {selected_index_name}...")
+                        logger.info(
+                            f"Downloading chunk {i + 1}/{total_chunks} for {selected_index_name}: {len(chunk_symbols)} symbols.")
+
+                        try:
+                            df_chunk = data_downloader.download_and_store_data(
+                                symbols=chunk_symbols,
+                                start_date=start_date_idx,
+                                end_date=end_date_idx
+                            )
+                            if not df_chunk.empty:
+                                all_downloaded_dfs.append(df_chunk)
+                                total_symbols_downloaded_this_session += df_chunk['Symbol'].nunique()
+                        except Exception as chunk_e:
+                            download_status_container.warning(
+                                f"Error downloading chunk {i + 1}: {chunk_e}. Skipping this chunk.")
+                            logger.warning(
+                                f"Error in chunk download for {selected_index_name} (chunk {i + 1}): {chunk_e}")
+
+                        progress_bar.progress(min((i + 1) / total_chunks, 1.0))  # Update progress bar
+
+                    if all_downloaded_dfs:
+                        combined_df = pd.concat(all_downloaded_dfs, ignore_index=True)
+                        _validate_and_store_data(combined_df, f"{selected_index_name} Components")
+                        st.success(
+                            f"Successfully downloaded and stored historical data for {total_symbols_downloaded_this_session} unique symbols from {selected_index_name} into the historical database!")
+                        logger.info(
+                            f"Completed download for {selected_index_name}: {total_symbols_downloaded_this_session} unique symbols.")
+                    else:
+                        st.warning(f"No data was downloaded for {selected_index_name} components.")
+                        logger.warning(f"No data downloaded for {selected_index_name} components.")
+
+                except Exception as e:
+                    st.error(f"An error occurred during index components download: {e}")
+                    logger.exception(f"Error downloading {selected_index_name} components' data.")
+                finally:
+                    progress_bar.empty()
+                    status_text.empty()  # Clear top status text
+                    download_status_container.empty()  # Clear chunk status text
 
     # --- File Upload Section ---
     elif source_type == "File Upload":
