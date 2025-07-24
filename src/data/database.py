@@ -8,13 +8,13 @@ from datetime import datetime, timedelta
 import numpy as np
 
 
-class HistoricalDatabaseManager: # Renamed from DatabaseManager
+class HistoricalDatabaseManager:
     """
     Database Management System for historical financial data.
     Manages connections, table creation, and data operations (insert, upsert, fetch).
     """
 
-    def __init__(self, db_uri: str = DATABASE_URL): # Use DATABASE_URL
+    def __init__(self, db_uri: str = DATABASE_URL):
         """
         Initialize database connection and metadata.
         Args:
